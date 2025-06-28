@@ -1,0 +1,340 @@
+---
+description:
+globs:
+alwaysApply: true
+---
+# macOS Wallpaper App - Cursor Development Plan
+
+## Project Setup Instructions for Cursor
+
+### Initial Setup
+```bash
+# Create new macOS app project
+# Target: macOS 11.0+
+# Language: Swift
+# Interface: SwiftUI + AppKit
+# Bundle Identifier: com.oxystack.wallpier
+```
+
+## Cursor Rules
+
+```
+# macOS Wallpaper App Development Rules
+
+## Project Context
+Building a minimal, fast macOS wallpaper app that cycles through images in subfolders recursively.
+
+## Code Style & Standards
+- Use Swift 5.7+ modern syntax
+- Prefer SwiftUI for UI, AppKit for system integration
+- Use async/await for concurrent operations
+- Follow Apple's Swift API Design Guidelines
+- Use descriptive variable names without Hungarian notation
+- Prefer structs over classes when possible
+- Use proper error handling with Result types
+
+## Architecture Patterns
+- Use MVVM pattern with SwiftUI
+- Implement dependency injection for testability
+- Use Combine for reactive programming
+- Separate concerns: UI, Business Logic, System Integration
+- Use protocols for mockable interfaces
+
+## Performance Requirements
+- All file operations must be async/background
+- Use NSCache for image caching
+- Implement lazy loading
+- Memory-efficient image handling
+- Use FileManager.DirectoryEnumerator for recursive scanning
+
+## macOS Integration
+- Use NSWorkspace for wallpaper setting
+- Request proper permissions (Full Disk Access if needed)
+- Support multi-monitor setups
+- Handle sandboxing considerations
+- Use UserDefaults for preferences
+
+## Code Organization
+- Group related functionality in separate files
+- Use extensions for protocol conformance
+- Keep view models focused and testable
+- Implement proper error states
+- Use meaningful file and folder structure
+
+## UI Guidelines
+- Minimal, native macOS design
+- Use SF Symbols for icons
+- Support both light and dark mode
+- Implement proper accessibility
+- Use native controls and layouts
+
+## Testing
+- Write unit tests for business logic
+- Mock system dependencies
+- Test error conditions
+- Verify memory management
+
+## Security
+- Handle file permissions properly
+- Validate image file types
+- Sanitize file paths
+- Implement proper error boundaries
+```
+
+## File Structure to Create
+
+```
+wallpier/
+├── wallpier.xcodeproj
+├── wallpier/
+│   ├── App/
+│   │   ├── wallpierApp.swift
+│   │   └── AppDelegate.swift
+│   ├── Views/
+│   │   ├── ContentView.swift
+│   │   ├── SettingsView.swift
+│   │   ├── FolderSelectionView.swift
+│   │   └── StatusMenuView.swift
+│   ├── ViewModels/
+│   │   ├── WallpaperViewModel.swift
+│   │   └── SettingsViewModel.swift
+│   ├── Models/
+│   │   ├── WallpaperSettings.swift
+│   │   ├── ImageFile.swift
+│   │   └── CycleConfiguration.swift
+│   ├── Services/
+│   │   ├── WallpaperService.swift
+│   │   ├── ImageScannerService.swift
+│   │   ├── FileMonitorService.swift
+│   │   └── ImageCacheService.swift
+│   ├── Utilities/
+│   │   ├── Extensions/
+│   │   ├── Constants.swift
+│   │   └── Logger.swift
+│   └── Resources/
+│       ├── Assets.xcassets
+│       └── Info.plist
+└── Tests/
+    └── wallpierTests/
+```
+
+## Step-by-Step Implementation Plan
+
+### Phase 1: Basic Project Setup
+**Prompt for Cursor:**
+```
+Create a new macOS SwiftUI app called wallpier. Set up the basic project structure with:
+1. Main app file with proper macOS configuration
+2. Basic ContentView with minimal UI
+3. AppDelegate for system integration
+4. Info.plist configured for macOS desktop app
+5. Target deployment macOS 11.0+
+
+Include proper entitlements for file system access and wallpaper setting.
+```
+
+### Phase 2: Core Services
+**Prompt for Cursor:**
+```
+Implement the core services following MVVM pattern:
+
+1. WallpaperService.swift - Handle setting desktop wallpaper using NSWorkspace
+2. ImageScannerService.swift - Recursively scan folders for image files
+3. ImageCacheService.swift - Efficient image caching with NSCache
+4. FileMonitorService.swift - Monitor folder changes using FileSystemWatcher
+
+Each service should:
+- Use async/await
+- Implement proper error handling
+- Follow protocol-based design
+- Include comprehensive logging
+- Be unit testable
+```
+
+### Phase 3: Models and Configuration
+**Prompt for Cursor:**
+```
+Create the data models:
+
+1. WallpaperSettings.swift - User preferences and configuration
+2. ImageFile.swift - Represent image files with metadata
+3. CycleConfiguration.swift - Cycling behavior settings
+
+Requirements:
+- Codable for UserDefaults persistence
+- Validation for file paths and intervals
+- Support for different scaling modes
+- Multi-monitor configuration
+```
+
+### Phase 4: ViewModels
+**Prompt for Cursor:**
+```
+Implement ViewModels using Combine and ObservableObject:
+
+1. WallpaperViewModel.swift - Main app state and cycling logic
+2. SettingsViewModel.swift - Settings management
+
+Features needed:
+- Start/stop wallpaper cycling
+- Folder selection and validation
+- Real-time settings updates
+- Error state management
+- Progress tracking for folder scanning
+```
+
+### Phase 5: User Interface
+**Prompt for Cursor:**
+```
+Create the SwiftUI interface:
+
+1. ContentView.swift - Main app interface
+2. SettingsView.swift - Settings panel
+3. FolderSelectionView.swift - Folder picker
+4. StatusMenuView.swift - Menu bar integration
+
+UI Requirements:
+- Native macOS design patterns
+- Dark/light mode support
+- Accessibility features
+- Minimal and clean layout
+- Real-time status updates
+```
+
+### Phase 6: System Integration
+**Prompt for Cursor:**
+```
+Implement macOS system integration:
+
+1. Request necessary permissions
+2. Menu bar icon and controls
+3. Launch at startup option
+4. Multi-monitor support
+5. Background operation
+6. Proper app lifecycle management
+
+Handle edge cases:
+- Permission denied scenarios
+- Missing folders
+- Unsupported file formats
+- System sleep/wake
+```
+
+### Phase 7: Performance Optimization
+**Prompt for Cursor:**
+```
+Optimize for performance:
+
+1. Implement efficient image loading
+2. Background processing for file operations
+3. Memory management for large image collections
+4. Caching strategies
+5. Lazy loading implementation
+6. Resource cleanup
+
+Performance targets:
+- < 100MB memory usage
+- < 1s folder scan for 1000 images
+- Smooth wallpaper transitions
+- No UI blocking operations
+```
+
+## Specific Implementation Details
+
+### Key Code Patterns to Use
+
+```swift
+// Service Protocol Pattern
+protocol WallpaperServiceProtocol {
+    func setWallpaper(_ imageURL: URL) async throws
+    func getCurrentWallpaper() -> URL?
+}
+
+// Async File Scanning
+func scanDirectory(_ url: URL) async throws -> [ImageFile] {
+    return try await withCheckedThrowingContinuation { continuation in
+        // FileManager enumeration logic
+    }
+}
+
+// Combine Integration
+@Published var isScanning: Bool = false
+@Published var foundImages: [ImageFile] = []
+@Published var currentError: Error?
+```
+
+### Error Handling Strategy
+```swift
+enum WallpaperError: LocalizedError {
+    case permissionDenied
+    case invalidImageFormat
+    case folderNotFound
+    case systemIntegrationFailed
+
+    var errorDescription: String? {
+        // Provide user-friendly error messages
+    }
+}
+```
+
+### Performance Monitoring
+```swift
+// Include performance logging
+func logPerformance<T>(_ operation: String, _ block: () throws -> T) rethrows -> T {
+    let startTime = CFAbsoluteTimeGetCurrent()
+    let result = try block()
+    let timeElapsed = CFAbsoluteTimeGetCurrent() - startTime
+    Logger.performance.info("\(operation) took \(timeElapsed) seconds")
+    return result
+}
+```
+
+## Testing Strategy
+
+### Unit Tests to Implement
+```
+- ImageScannerService folder traversal
+- WallpaperService error handling
+- Settings persistence and validation
+- Cache performance and memory limits
+- File monitoring functionality
+```
+
+### Integration Tests
+```
+- End-to-end wallpaper setting
+- Permission request flows
+- Multi-monitor scenarios
+- Large folder performance
+```
+
+## Distribution Preparation
+
+### Code Signing & Notarization
+```bash
+# Development team setup
+# Provisioning profile configuration
+# Entitlements for system access
+# Notarization workflow
+```
+
+### Performance Benchmarks
+- Startup time: < 2 seconds
+- Memory usage: < 100MB steady state
+- Folder scan: < 1000ms for 500 images
+- Wallpaper change: < 500ms
+
+## Cursor-Specific Tips
+
+1. **Use detailed prompts**: Be specific about architectural patterns and requirements
+2. **Request complete implementations**: Ask for full files rather than snippets
+3. **Specify error handling**: Always include comprehensive error scenarios
+4. **Ask for tests**: Request unit tests alongside implementation
+5. **Iterate incrementally**: Build and test each phase before moving forward
+6. **Request documentation**: Ask for code comments and README updates
+
+## Final Prompt for Complete Implementation
+
+```
+Using the above plan and architecture, implement a complete macOS wallpaper cycling application. Follow all the specified patterns, performance requirements, and architectural decisions. Include comprehensive error handling, logging, and ensure the app is ready for distribution. Implement all phases incrementally, testing each component before proceeding to the next.
+```
