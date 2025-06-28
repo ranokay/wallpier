@@ -8,6 +8,7 @@
 import Foundation
 import AppKit
 import OSLog
+import Combine
 
 /// Errors that can occur when setting wallpapers
 enum WallpaperError: LocalizedError {
@@ -17,6 +18,7 @@ enum WallpaperError: LocalizedError {
     case systemIntegrationFailed
     case fileNotFound
     case unsupportedImageType
+    case setWallpaperFailed(Error)
 
     var errorDescription: String? {
         switch self {
@@ -32,12 +34,14 @@ enum WallpaperError: LocalizedError {
             return "The specified image file could not be found."
         case .unsupportedImageType:
             return "This image type is not supported for wallpapers."
+        case .setWallpaperFailed(let error):
+            return "Failed to set wallpaper: \(error.localizedDescription)"
         }
     }
 }
 
 /// Protocol for wallpaper service operations
-protocol WallpaperServiceProtocol {
+@preconcurrency protocol WallpaperServiceProtocol: Sendable {
     func setWallpaper(_ imageURL: URL) async throws
     func setWallpaper(_ imageURL: URL, multiMonitorSettings: MultiMonitorSettings) async throws
     func setWallpaperForMultipleMonitors(_ imageURLs: [URL], multiMonitorSettings: MultiMonitorSettings) async throws
@@ -45,6 +49,7 @@ protocol WallpaperServiceProtocol {
     func getCurrentWallpapers() async -> [NSScreen: URL]
     func getSupportedImageTypes() async -> [String]
     func setWallpaperForScreen(_ imageURL: URL, screen: NSScreen?) async throws
+    var wallpaperPublisher: AnyPublisher<URL?, Never> { get }
 }
 
 /// Service responsible for setting desktop wallpapers
@@ -58,6 +63,22 @@ protocol WallpaperServiceProtocol {
 
     /// Current wallpapers per screen for multi-monitor support
     private var currentWallpapers: [NSScreen: URL] = [:]
+
+    private let wallpaperDidChangePublisher = PassthroughSubject<URL?, Never>()
+
+    var wallpaperPublisher: AnyPublisher<URL?, Never> {
+        wallpaperDidChangePublisher.eraseToAnyPublisher()
+    }
+
+    init() {
+        // No system notification exists for wallpaper changes; polling is required if you want to detect changes.
+        // NSWorkspace.shared.notificationCenter.addObserver(
+        //     self,
+        //     selector: #selector(wallpaperDidChange),
+        //     name: NSWorkspace.didChangeDesktopImageNotification,
+        //     object: nil
+        // )
+    }
 
     /// Sets wallpaper for all screens (legacy method)
     func setWallpaper(_ imageURL: URL) async throws {
@@ -145,9 +166,8 @@ protocol WallpaperServiceProtocol {
     func setWallpaperForScreen(_ imageURL: URL, screen: NSScreen? = nil) async throws {
         return try await withCheckedThrowingContinuation { continuation in
             DispatchQueue.main.async {
+                let targetScreen = screen ?? NSScreen.main ?? NSScreen.screens.first!
                 do {
-                    let targetScreen = screen ?? NSScreen.main ?? NSScreen.screens.first!
-
                     // Create options dictionary with proper types for Objective-C compatibility
                     let options: [NSWorkspace.DesktopImageOptionKey: Any] = [
                         .allowClipping: true,
@@ -155,10 +175,12 @@ protocol WallpaperServiceProtocol {
                     ]
 
                     try self.workspace.setDesktopImageURL(imageURL, for: targetScreen, options: options)
+                    self.logger.info("Successfully set wallpaper for screen \(targetScreen.localizedName)")
+                    self.wallpaperDidChangePublisher.send(imageURL)
                     continuation.resume()
                 } catch {
-                    self.logger.error("Failed to set wallpaper: \(error.localizedDescription)")
-                    continuation.resume(throwing: WallpaperError.systemIntegrationFailed)
+                    self.logger.error("Failed to set wallpaper for screen \(targetScreen.localizedName): \(error.localizedDescription)")
+                    continuation.resume(throwing: WallpaperError.setWallpaperFailed(error))
                 }
             }
         }

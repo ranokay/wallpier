@@ -9,9 +9,11 @@ import Foundation
 import AppKit
 import ServiceManagement
 import OSLog
+import Combine
 
 /// Protocol defining system integration capabilities
-protocol SystemServiceProtocol {
+@MainActor
+protocol SystemServiceProtocol: Sendable {
     /// Request necessary permissions for the app
     func requestPermissions() async -> Bool
 
@@ -22,13 +24,13 @@ protocol SystemServiceProtocol {
     func setLaunchAtStartup(_ enabled: Bool) async -> Bool
 
     /// Check current permission status
-    nonisolated func checkPermissionStatus() -> PermissionStatus
+    func checkPermissionStatus() -> PermissionStatus
 
     /// Hide dock icon for menu bar only operation
-    nonisolated func configureDockVisibility(_ visible: Bool)
+    func configureDockVisibility(_ visible: Bool)
 
     /// Handle app state changes
-    nonisolated func handleAppStateChange(_ state: AppState)
+    func handleAppStateChange(_ state: AppState)
 }
 
 /// System permission status
@@ -58,14 +60,16 @@ enum AppState {
 
 /// System integration service implementation
 @MainActor
-@preconcurrency class SystemService: ObservableObject, SystemServiceProtocol {
+class SystemService: NSObject, SystemServiceProtocol, ObservableObject {
     private let logger = Logger(subsystem: "com.oxystack.wallpier", category: "SystemService")
 
     @Published var permissionStatus: PermissionStatus = .notDetermined
     @Published var isDockHidden: Bool = false
     @Published var currentAppState: AppState = .launching
+    @Published var isLaunchAtStartupEnabled: Bool = false
 
-    init() {
+    override init() {
+        super.init()
         setupNotificationObservers()
         let _ = self.checkPermissionStatus()
     }
@@ -78,39 +82,34 @@ enum AppState {
 
     func requestPermissions() async -> Bool {
         logger.info("Requesting system permissions")
-
         return await withCheckedContinuation { continuation in
-            DispatchQueue.main.async {
-                let openPanel = NSOpenPanel()
-                openPanel.title = "Grant File Access"
-                openPanel.message = "To cycle wallpapers, Wallpier needs access to your image folders. Please select a folder containing images."
-                openPanel.canChooseFiles = false
-                openPanel.canChooseDirectories = true
-                openPanel.allowsMultipleSelection = false
-                openPanel.canCreateDirectories = false
-
-                // Start in Pictures directory if possible
-                let picturesURL = FileManager.default.urls(for: .picturesDirectory, in: .userDomainMask).first
-                openPanel.directoryURL = picturesURL
-
-                openPanel.begin { response in
-                    if response == .OK {
-                        // User selected a folder, which grants access
-                        self.logger.info("User granted folder access")
-                        self.permissionStatus = .granted
-                        continuation.resume(returning: true)
-                    } else {
-                        // User cancelled
-                        self.logger.info("User cancelled folder access request")
-                        self.permissionStatus = .denied
-                        continuation.resume(returning: false)
-                    }
+            let openPanel = NSOpenPanel()
+            openPanel.title = "Grant File Access"
+            openPanel.message = "To cycle wallpapers, Wallpier needs access to your image folders. Please select a folder containing images."
+            openPanel.canChooseFiles = false
+            openPanel.canChooseDirectories = true
+            openPanel.allowsMultipleSelection = false
+            openPanel.canCreateDirectories = false
+            // Start in Pictures directory if possible
+            let picturesURL = FileManager.default.urls(for: .picturesDirectory, in: .userDomainMask).first
+            openPanel.directoryURL = picturesURL
+            openPanel.begin { response in
+                if response == .OK {
+                    // User selected a folder, which grants access
+                    self.logger.info("User granted folder access")
+                    self.permissionStatus = .granted
+                    continuation.resume(returning: true)
+                } else {
+                    // User cancelled
+                    self.logger.info("User cancelled folder access request")
+                    self.permissionStatus = .denied
+                    continuation.resume(returning: false)
                 }
             }
         }
     }
 
-    nonisolated func checkPermissionStatus() -> PermissionStatus {
+    func checkPermissionStatus() -> PermissionStatus {
         // For sandboxed apps, we consider permissions granted if:
         // 1. The user has previously selected folders (which gives us access to those folders)
         // 2. The app can read its own bundle and basic system info
@@ -137,70 +136,36 @@ enum AppState {
 
     // MARK: - Launch at Startup
 
-    var isLaunchAtStartupEnabled: Bool {
-        if #available(macOS 13.0, *) {
-            return SMAppService.mainApp.status == .enabled
-        } else {
-            // Fallback for older macOS versions
-            return checkLegacyLaunchAtStartup()
-        }
-    }
-
     func setLaunchAtStartup(_ enabled: Bool) async -> Bool {
         logger.info("Setting launch at startup: \(enabled)")
-
-        if #available(macOS 13.0, *) {
-            do {
-                if enabled {
-                    try await SMAppService.mainApp.register()
-                    logger.info("Successfully registered for launch at startup")
-                } else {
-                    try await SMAppService.mainApp.unregister()
-                    logger.info("Successfully unregistered from launch at startup")
-                }
-                return true
-            } catch {
-                logger.error("Failed to set launch at startup: \(error.localizedDescription)")
-                return false
+        do {
+            if enabled {
+                try SMAppService.mainApp.register()
+            } else {
+                try await SMAppService.mainApp.unregister()
             }
-        } else {
-            // Fallback for older macOS versions
-            return setLegacyLaunchAtStartup(enabled)
+            self.isLaunchAtStartupEnabled = enabled
+            return true
+        } catch {
+            logger.error("Failed to update launch at startup setting: \(error.localizedDescription)")
+            return false
         }
-    }
-
-            private func checkLegacyLaunchAtStartup() -> Bool {
-        // For macOS < 13.0, return false as we'll focus on the modern API
-        // The legacy LSSharedFileList API is deprecated and complex to implement correctly
-        logger.info("Legacy launch at startup check not implemented - using modern API only")
-        return false
-    }
-
-            private func setLegacyLaunchAtStartup(_ enabled: Bool) -> Bool {
-        // For macOS < 13.0, return false as we'll focus on the modern API
-        // The legacy LSSharedFileList API is deprecated and complex to implement correctly
-        logger.warning("Legacy launch at startup setting not implemented - modern API required")
-        return false
     }
 
     // MARK: - Dock Visibility
 
-    nonisolated func configureDockVisibility(_ visible: Bool) {
+    func configureDockVisibility(_ visible: Bool) {
         logger.info("Configuring dock visibility: \(visible)")
-
         let policy: NSApplication.ActivationPolicy = visible ? .regular : .accessory
         NSApp.setActivationPolicy(policy)
-
         self.isDockHidden = !visible
     }
 
     // MARK: - App State Management
 
-        nonisolated func handleAppStateChange(_ state: AppState) {
+    func handleAppStateChange(_ state: AppState) {
         logger.debug("App state changed to: \(String(describing: state))")
-
         self.currentAppState = state
-
         switch state {
         case .launching:
             // Setup launch behavior

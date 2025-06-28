@@ -8,9 +8,10 @@
 import Foundation
 import AppKit
 import OSLog
+import Combine
 
 /// Protocol for image caching operations
-protocol ImageCacheServiceProtocol {
+@preconcurrency protocol ImageCacheServiceProtocol: Sendable {
     func cacheImage(_ image: NSImage, for url: URL) async
     func getCachedImage(for url: URL) async -> NSImage?
     func preloadImage(from url: URL) async -> NSImage?
