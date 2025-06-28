@@ -104,8 +104,7 @@ struct WallpaperSettings: Codable {
     /// Whether to show menu bar icon
     var showMenuBarIcon: Bool
 
-    /// Whether to show notifications
-    var showNotifications: Bool
+
 
     /// Multi-monitor configuration
     var multiMonitorSettings: MultiMonitorSettings
@@ -131,7 +130,6 @@ struct WallpaperSettings: Codable {
         self.isShuffleEnabled = true
         self.launchAtStartup = false
         self.showMenuBarIcon = true
-        self.showNotifications = true
         self.multiMonitorSettings = MultiMonitorSettings()
         self.fileFilters = FileFilters()
         self.advancedSettings = AdvancedSettings()
@@ -286,8 +284,7 @@ struct SystemIntegrationSettings: Codable {
     /// Whether to show launch at startup dialog on first run
     var hasShownStartupDialog: Bool
 
-    /// Whether to show notification when wallpaper changes
-    var showWallpaperChangeNotifications: Bool
+
 
     /// Whether to pause cycling when screen is locked
     var pauseWhenScreenLocked: Bool
@@ -299,7 +296,6 @@ struct SystemIntegrationSettings: Codable {
         self.launchAtStartup = false
         self.hideDockIcon = false
         self.hasShownStartupDialog = false
-        self.showWallpaperChangeNotifications = false
         self.pauseWhenScreenLocked = false
         self.pauseDuringPresentations = true
     }

@@ -57,6 +57,9 @@ final class WallpaperViewModel: ObservableObject {
     private let scanningQueue = DispatchQueue(label: "com.oxystack.wallpier.scanning", qos: .userInitiated)
     private let wallpaperQueue = DispatchQueue(label: "com.oxystack.wallpier.wallpaper", qos: .userInitiated)
 
+    // Multi-monitor cycling state
+    private var screenCycleIndices: [NSScreen: Int] = [:]
+
     // Performance monitoring
     private var lastWallpaperChangeTime = Date()
     private var averageChangeTime: TimeInterval = 0
@@ -172,6 +175,10 @@ final class WallpaperViewModel: ObservableObject {
         isRunning = false
         cycleConfiguration.isActive = false
         timeUntilNextChange = 0
+
+        // Clear screen cycle indices to ensure fresh start next time
+        screenCycleIndices.removeAll()
+
         updateStatus("Cycling stopped")
 
         logger.info("Wallpaper cycling stopped")
@@ -267,14 +274,18 @@ final class WallpaperViewModel: ObservableObject {
                 updateStatus("No folder selected")
             }
         } else if newSettings.folderPath != nil {
-            // Even if it's the same folder, update the current image display
-            // This handles the case where user selects the same folder again
+            // Even if it's the same folder, ensure state is properly synced
             selectedFolderPath = newSettings.folderPath
-            currentImage = cycleConfiguration.currentImage
 
-            // Refresh the status if we have images
-            if !foundImages.isEmpty {
-                updateStatus("Folder: \(newSettings.folderPath?.lastPathComponent ?? "Unknown")")
+            // If we don't have images but should, trigger a scan
+            if foundImages.isEmpty && !isScanning {
+                Task {
+                    await scanFolder(newSettings.folderPath!, showProgress: false)
+                }
+            } else if !foundImages.isEmpty {
+                // Update current image display and status
+                currentImage = cycleConfiguration.currentImage
+                updateStatus("Found \(foundImages.count) images")
             }
         }
 
@@ -289,8 +300,12 @@ final class WallpaperViewModel: ObservableObject {
 
             if newSettings.isShuffleEnabled {
                 cycleConfiguration.shuffleQueue()
+                // Reset screen indices for fresh randomization
+                resetScreenCycleIndices()
             } else {
                 cycleConfiguration.sortQueue(newSettings.sortOrder)
+                // Reset screen indices for new order
+                resetScreenCycleIndices()
             }
         }
     }
@@ -397,6 +412,9 @@ final class WallpaperViewModel: ObservableObject {
                 currentImage = cycleConfiguration.currentImage
                 scanProgress = 0
                 isScanning = false
+
+                // Clear screen cycle indices since we have a new image list
+                screenCycleIndices.removeAll()
 
                 let message = "Found \(images.count) images in \(String(format: "%.3f", elapsed))s"
                 updateStatus(message)
@@ -516,23 +534,22 @@ final class WallpaperViewModel: ObservableObject {
             let screens = NSScreen.screens
             var imageURLs: [URL] = []
             var initialImages: [NSScreen: ImageFile] = [:]
-            var usedIndices: Set<Int> = []
+
+            // Initialize screen cycle indices with proper starting points
+            screenCycleIndices.removeAll()
 
             for (screenIndex, screen) in screens.enumerated() {
-                let imageIndex = screenIndex % foundImages.count
-                var finalIndex = imageIndex
-
-                // Ensure we don't use the same image on multiple screens (if we have enough images)
-                if foundImages.count >= screens.count {
-                    var attempts = 0
-                    while usedIndices.contains(finalIndex) && attempts < foundImages.count {
-                        finalIndex = (finalIndex + 1) % foundImages.count
-                        attempts += 1
-                    }
+                let startIndex: Int
+                if settings.isShuffleEnabled {
+                    // Random starting point for each screen
+                    startIndex = Int.random(in: 0..<foundImages.count)
+                } else {
+                    // Staggered starting points for each screen
+                    startIndex = screenIndex % foundImages.count
                 }
 
-                usedIndices.insert(finalIndex)
-                let imageFile = foundImages[finalIndex]
+                screenCycleIndices[screen] = startIndex
+                let imageFile = foundImages[startIndex]
                 initialImages[screen] = imageFile
                 imageURLs.append(imageFile.url)
             }
@@ -578,7 +595,7 @@ final class WallpaperViewModel: ObservableObject {
         updateCycleProgress()
     }
 
-    /// Sets next wallpaper for multi-monitor setup
+    /// Sets next wallpaper for multi-monitor setup with proper cycling
     private func setNextWallpaperMultiMonitor() async {
         guard !foundImages.isEmpty else {
             updateStatus("No images available")
@@ -591,50 +608,58 @@ final class WallpaperViewModel: ObservableObject {
 
         if settings.multiMonitorSettings.useSameWallpaperOnAllMonitors {
             // Use same wallpaper on all monitors - advance from current image
-            let currentIndex = cycleConfiguration.currentIndex
-            let nextIndex = (currentIndex + 1) % foundImages.count
-            let nextImage = foundImages[nextIndex]
+            guard let nextImage = cycleConfiguration.advanceToNext() else {
+                updateStatus("No next image available")
+                return
+            }
 
             for screen in screens {
                 nextImages[screen] = nextImage
                 imageURLs.append(nextImage.url)
             }
         } else {
-            // Use different wallpapers on each monitor
-            var usedIndices: Set<Int> = []
-
-            for (screenIndex, screen) in screens.enumerated() {
-                var nextIndex: Int
-
-                if let currentImageForScreen = currentImages[screen],
-                   let currentIndex = foundImages.firstIndex(of: currentImageForScreen) {
-                    // Advance from current image for this screen
-                    nextIndex = (currentIndex + 1) % foundImages.count
-                } else {
-                    // If no current image for this screen, start with screen-specific offset
-                    nextIndex = screenIndex % foundImages.count
-                }
-
-                // Ensure we don't use the same image on multiple screens (if we have enough images)
-                if foundImages.count >= screens.count {
-                    var attempts = 0
-                    while usedIndices.contains(nextIndex) && attempts < foundImages.count {
-                        nextIndex = (nextIndex + 1) % foundImages.count
-                        attempts += 1
-                    }
-                }
-
-                usedIndices.insert(nextIndex)
-                let nextImage = foundImages[nextIndex]
-                nextImages[screen] = nextImage
-                imageURLs.append(nextImage.url)
-            }
+            // Use different wallpapers on each monitor with proper individual cycling
+            await setNextWallpaperIndependentMonitors(&nextImages, &imageURLs)
         }
 
         await setMultipleWallpapers(imageURLs, newImages: nextImages)
     }
 
-    /// Sets previous wallpaper for multi-monitor setup
+    /// Sets next wallpaper for independent monitor cycling
+    private func setNextWallpaperIndependentMonitors(_ nextImages: inout [NSScreen: ImageFile], _ imageURLs: inout [URL]) async {
+        let screens = NSScreen.screens
+
+        // Create or maintain separate cycling indices for each screen
+        if screenCycleIndices.isEmpty {
+            // Initialize indices for each screen with different starting points
+            for (index, screen) in screens.enumerated() {
+                let startIndex: Int
+                if settings.isShuffleEnabled {
+                    // Random starting point for each screen
+                    startIndex = Int.random(in: 0..<foundImages.count)
+                } else {
+                    // Staggered starting points for each screen
+                    startIndex = index % foundImages.count
+                }
+                screenCycleIndices[screen] = startIndex
+            }
+        }
+
+        // Advance each screen's index independently
+        for screen in screens {
+            var currentScreenIndex = screenCycleIndices[screen] ?? 0
+
+            // Advance to next image for this specific screen
+            currentScreenIndex = (currentScreenIndex + 1) % foundImages.count
+            screenCycleIndices[screen] = currentScreenIndex
+
+            let nextImage = foundImages[currentScreenIndex]
+            nextImages[screen] = nextImage
+            imageURLs.append(nextImage.url)
+        }
+    }
+
+    /// Sets previous wallpaper for multi-monitor setup with proper cycling
     private func setPreviousWallpaperMultiMonitor() async {
         guard !foundImages.isEmpty else {
             updateStatus("No images available")
@@ -647,47 +672,55 @@ final class WallpaperViewModel: ObservableObject {
 
         if settings.multiMonitorSettings.useSameWallpaperOnAllMonitors {
             // Use same wallpaper on all monitors - go back from current image
-            let currentIndex = cycleConfiguration.currentIndex
-            let prevIndex = currentIndex == 0 ? foundImages.count - 1 : currentIndex - 1
-            let prevImage = foundImages[prevIndex]
+            guard let prevImage = cycleConfiguration.goToPrevious() else {
+                updateStatus("No previous image available")
+                return
+            }
 
             for screen in screens {
                 prevImages[screen] = prevImage
                 imageURLs.append(prevImage.url)
             }
         } else {
-            // Use different wallpapers on each monitor
-            var usedIndices: Set<Int> = []
-
-            for (screenIndex, screen) in screens.enumerated() {
-                var prevIndex: Int
-
-                if let currentImageForScreen = currentImages[screen],
-                   let currentIndex = foundImages.firstIndex(of: currentImageForScreen) {
-                    // Go back from current image for this screen
-                    prevIndex = currentIndex == 0 ? foundImages.count - 1 : currentIndex - 1
-                } else {
-                    // If no current image for this screen, start with screen-specific offset
-                    prevIndex = screenIndex % foundImages.count
-                }
-
-                // Ensure we don't use the same image on multiple screens (if we have enough images)
-                if foundImages.count >= screens.count {
-                    var attempts = 0
-                    while usedIndices.contains(prevIndex) && attempts < foundImages.count {
-                        prevIndex = prevIndex == 0 ? foundImages.count - 1 : prevIndex - 1
-                        attempts += 1
-                    }
-                }
-
-                usedIndices.insert(prevIndex)
-                let prevImage = foundImages[prevIndex]
-                prevImages[screen] = prevImage
-                imageURLs.append(prevImage.url)
-            }
+            // Use different wallpapers on each monitor with proper individual cycling
+            await setPreviousWallpaperIndependentMonitors(&prevImages, &imageURLs)
         }
 
         await setMultipleWallpapers(imageURLs, newImages: prevImages)
+    }
+
+    /// Sets previous wallpaper for independent monitor cycling
+    private func setPreviousWallpaperIndependentMonitors(_ prevImages: inout [NSScreen: ImageFile], _ imageURLs: inout [URL]) async {
+        let screens = NSScreen.screens
+
+        // Ensure indices are initialized
+        if screenCycleIndices.isEmpty {
+            // Initialize indices for each screen with different starting points
+            for (index, screen) in screens.enumerated() {
+                let startIndex: Int
+                if settings.isShuffleEnabled {
+                    // Random starting point for each screen
+                    startIndex = Int.random(in: 0..<foundImages.count)
+                } else {
+                    // Staggered starting points for each screen
+                    startIndex = index % foundImages.count
+                }
+                screenCycleIndices[screen] = startIndex
+            }
+        }
+
+        // Go back on each screen's index independently
+        for screen in screens {
+            var currentScreenIndex = screenCycleIndices[screen] ?? 0
+
+            // Go back to previous image for this specific screen
+            currentScreenIndex = currentScreenIndex == 0 ? foundImages.count - 1 : currentScreenIndex - 1
+            screenCycleIndices[screen] = currentScreenIndex
+
+            let prevImage = foundImages[currentScreenIndex]
+            prevImages[screen] = prevImage
+            imageURLs.append(prevImage.url)
+        }
     }
 
         /// Sets multiple wallpapers for multi-monitor setup
@@ -911,6 +944,28 @@ final class WallpaperViewModel: ObservableObject {
     /// Updates status message
     private func updateStatus(_ message: String) {
         statusMessage = message
+    }
+
+    /// Resets screen cycle indices for fresh randomization
+    private func resetScreenCycleIndices() {
+        guard !foundImages.isEmpty else { return }
+
+        let screens = NSScreen.screens
+        screenCycleIndices.removeAll()
+
+        for (index, screen) in screens.enumerated() {
+            let startIndex: Int
+            if settings.isShuffleEnabled {
+                // Random starting point for each screen
+                startIndex = Int.random(in: 0..<foundImages.count)
+            } else {
+                // Staggered starting points for each screen
+                startIndex = index % foundImages.count
+            }
+            screenCycleIndices[screen] = startIndex
+        }
+
+        logger.debug("Reset screen cycle indices for \(screens.count) screens")
     }
 
     /// Cleanup resources

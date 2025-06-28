@@ -65,6 +65,9 @@ struct wallpierApp: App {
                         .environmentObject(systemService)
                 }
                 .onAppear {
+                    // Ensure WallpaperViewModel has the correct settings from app startup
+                    wallpaperViewModel.updateSettings(settingsViewModel.settings)
+
                     // Initial system setup
                     Task {
                         // Only request permissions if this is first launch and no folder is selected
@@ -119,9 +122,9 @@ struct wallpierApp: App {
         WindowGroup("Wallpier Settings", id: "settings") {
             SettingsView(viewModel: settingsViewModel)
                 .environmentObject(systemService)
-                .frame(minWidth: 600, minHeight: 500)
         }
         .windowResizability(.contentSize)
+        .defaultSize(width: 750, height: 550)
         .defaultPosition(.center)
 
         // Menu Bar Extra with fixes for state and layout
