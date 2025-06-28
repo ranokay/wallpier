@@ -41,7 +41,7 @@ protocol ImageCacheServiceProtocol {
     /// Performance optimization settings
     private let maxCacheSize: Int
     private let maxThumbnailSize: Int = 10 * 1024 * 1024 // 10MB for thumbnails
-    private let preloadBatchSize = 5
+    private let preloadBatchSize = 2 // Very conservative batch size
     private let maxConcurrentLoads = 4
 
     /// Memory pressure monitoring
@@ -54,14 +54,15 @@ protocol ImageCacheServiceProtocol {
     private var cacheMisses = 0
     private var preloadRequests = 0
 
-    /// Enhanced metadata for smart cache management
-    private class ImageMetadata {
+    /// Enhanced metadata for intelligent caching
+    class ImageMetadata: NSObject {
         let fileSize: Int
         var lastAccessed: Date
         let imageSize: CGSize
         var accessCount: Int
         let cacheTime: Date
         var priority: Int // Higher = more important
+        private var consecutiveHits: Int = 0
 
         init(fileSize: Int, lastAccessed: Date, imageSize: CGSize, priority: Int = 1) {
             self.fileSize = fileSize
@@ -75,19 +76,41 @@ protocol ImageCacheServiceProtocol {
         func updateAccess() {
             lastAccessed = Date()
             accessCount += 1
+            consecutiveHits += 1
         }
 
-        /// Score for cache eviction (higher = keep longer)
+        /// Improved scoring algorithm with better differentiation
         var retentionScore: Double {
-            let ageBonus = max(0, 1.0 - Date().timeIntervalSince(cacheTime) / (24 * 3600)) // Newer is better
-            let accessBonus = min(Double(accessCount) / 10.0, 1.0) // More accesses = better
-            let priorityBonus = Double(priority) / 10.0
-            return ageBonus + accessBonus + priorityBonus
+            let now = Date()
+            let timeSinceCache = now.timeIntervalSince(cacheTime)
+            let timeSinceAccess = now.timeIntervalSince(lastAccessed)
+
+            // Age penalty (images get less valuable over time)
+            let agePenalty = min(timeSinceCache / 3600.0, 10.0) // Hours since cached
+
+            // Access frequency bonus (heavily weight recent and frequent access)
+            let accessFrequency = Double(accessCount) / max(timeSinceCache / 60.0, 1.0) // accesses per minute
+            let accessBonus = min(accessFrequency * 5.0, 10.0)
+
+            // Recency bonus (recently accessed items are more valuable)
+            let recencyBonus = max(0, 10.0 - timeSinceAccess / 60.0) // Minutes since last access
+
+            // Size penalty (larger images are more expensive to keep)
+            let sizePenalty = log10(Double(fileSize) / (1024 * 1024)) // MB in log scale
+
+            // Priority bonus
+            let priorityBonus = Double(priority) * 2.0
+
+            // Consecutive hits bonus (hot images)
+            let hotBonus = min(Double(consecutiveHits) * 0.5, 3.0)
+
+            let score = accessBonus + recencyBonus + priorityBonus + hotBonus - agePenalty - sizePenalty
+            return max(0.1, score) // Ensure minimum score
         }
     }
 
     init(maxCacheSizeMB: Int = 100) {
-        self.maxCacheSize = max(10, min(maxCacheSizeMB, 1000)) // Clamp between 10MB and 1GB
+        self.maxCacheSize = max(10, min(maxCacheSizeMB, 500)) // Clamp to reasonable range
         configureCache()
         setupMemoryManagement()
 
@@ -98,23 +121,23 @@ protocol ImageCacheServiceProtocol {
         NotificationCenter.default.removeObserver(self)
     }
 
-    /// Configures all cache layers with optimized settings
+    /// Configures all cache layers with aggressive memory limits
     private func configureCache() {
         let totalCostLimit = maxCacheSize * 1024 * 1024
 
-        // Main image cache (70% of total memory)
-        imageCache.totalCostLimit = Int(Double(totalCostLimit) * 0.7)
-        imageCache.countLimit = min(50, maxCacheSize / 2) // Adaptive count limit
+        // Reduce cache sizes significantly for large images
+        imageCache.totalCostLimit = Int(Double(totalCostLimit) * 0.6) // Reduced from 70%
+        imageCache.countLimit = min(20, maxCacheSize / 4) // Much more aggressive limit
         imageCache.evictsObjectsWithDiscardedContent = true
 
-        // Thumbnail cache (20% of total memory)
-        thumbnailCache.totalCostLimit = Int(Double(totalCostLimit) * 0.2)
-        thumbnailCache.countLimit = 100
+        // Increase thumbnail cache proportion
+        thumbnailCache.totalCostLimit = Int(Double(totalCostLimit) * 0.3) // Increased from 20%
+        thumbnailCache.countLimit = 50
         thumbnailCache.evictsObjectsWithDiscardedContent = true
 
-        // Metadata cache (10% of total memory, lightweight)
+        // Metadata cache
         metadataCache.totalCostLimit = Int(Double(totalCostLimit) * 0.1)
-        metadataCache.countLimit = 200
+        metadataCache.countLimit = 100
         metadataCache.evictsObjectsWithDiscardedContent = true
 
         logger.info("Cache configured: Main=\(self.imageCache.totalCostLimit/1024/1024)MB, Thumbnails=\(self.thumbnailCache.totalCostLimit/1024/1024)MB")
@@ -154,28 +177,45 @@ protocol ImageCacheServiceProtocol {
     /// Caches an image with enhanced metadata and smart eviction
     func cacheImage(_ image: NSImage, for url: URL) {
         let key = url.absoluteString as NSString
-        let cost = estimateImageMemorySize(image)
 
-        guard cost > 0 && cost < 100 * 1024 * 1024 else { // Max 100MB per image
-            logger.warning("Skipping cache for oversized image: \(url.lastPathComponent)")
+        // Prevent duplicate caching
+        if cachedImageKeys.contains(key) {
+            updateAccessMetadata(for: key) // Just update access
             return
         }
 
-        // Determine priority based on file characteristics
+        let cost = estimateImageMemorySize(image)
+
+        // Much stricter size limits
+        guard cost > 0 && cost < 20 * 1024 * 1024 else { // Max 20MB per image
+            logger.warning("Rejecting oversized image: \(url.lastPathComponent) (\(self.formatBytes(cost)))")
+            return
+        }
+
+        // Check memory pressure before caching
+        let currentMemory = getCurrentMemoryUsage()
+        if currentMemory > 300 * 1024 * 1024 { // 300MB limit
+            logger.warning("Rejecting cache due to memory pressure: \(self.formatBytes(currentMemory))")
+            Task { await performAggressiveCleanup() }
+            return
+        }
+
         let priority = determineCachePriority(url: url, imageSize: image.size)
 
-        // Store in appropriate cache layer
-        if cost < 5 * 1024 * 1024 { // Small images (< 5MB) go to main cache
+        // Smart cache placement based on size and usage
+        if cost < 2 * 1024 * 1024 { // Small images (< 2MB)
             imageCache.setObject(image, forKey: key, cost: cost)
+            logger.debug("Cached to main: \(url.lastPathComponent) (\(self.formatBytes(cost)), priority: \(priority))")
         } else {
-            // Large images: store thumbnail and defer full image to disk if needed
-            if let thumbnail = createThumbnail(from: image) {
+            // Large images: store optimized thumbnail only
+            if let thumbnail = createThumbnail(from: image, maxSize: 256) {
                 let thumbnailCost = estimateImageMemorySize(thumbnail)
                 thumbnailCache.setObject(thumbnail, forKey: key, cost: thumbnailCost)
+                logger.debug("Cached thumbnail: \(url.lastPathComponent) (\(self.formatBytes(thumbnailCost)), priority: \(priority))")
             }
         }
 
-        // Store enhanced metadata
+        // Store metadata
         let metadata = ImageMetadata(
             fileSize: cost,
             lastAccessed: Date(),
@@ -183,11 +223,9 @@ protocol ImageCacheServiceProtocol {
             priority: priority
         )
         metadataCache.setObject(metadata, forKey: key)
-        cachedImageKeys.insert(key) // Add key to our tracking set
+        cachedImageKeys.insert(key)
 
-        logger.debug("Cached image: \(url.lastPathComponent) (size: \(self.formatBytes(cost)), priority: \(priority))")
-
-        // Check if we need to free up space
+        // Proactive cleanup if nearing limits
         if shouldPerformCleanup() {
             Task { await performSmartEviction() }
         }
@@ -250,18 +288,32 @@ protocol ImageCacheServiceProtocol {
         }
     }
 
-    /// Batch preloading with priority and concurrency control
+    /// Batch preloading with memory pressure and concurrency control
     func preloadImages(_ urls: [URL], priority: TaskPriority = .medium) async {
-        logger.info("Starting batch preload of \(urls.count) images")
+        // Check memory pressure before starting batch preload
+        let currentMemory = getCurrentMemoryUsage()
+        if currentMemory > 400 * 1024 * 1024 { // 400MB limit for batch operations
+            logger.warning("Skipping batch preload due to memory pressure: \(self.formatBytes(currentMemory))")
+            return
+        }
+
+        // Limit batch size based on memory pressure
+        let limitedUrls = Array(urls.prefix(isUnderMemoryPressure ? 1 : min(3, urls.count)))
+
+        logger.info("Starting conservative batch preload of \(limitedUrls.count) images (from \(urls.count) requested)")
 
         let startTime = CFAbsoluteTimeGetCurrent()
 
-        await withTaskGroup(of: Void.self) { group in
-            for batch in urls.chunked(into: preloadBatchSize) {
-                group.addTask(priority: priority) { [weak self] in
-                    await self?.preloadBatch(batch)
-                }
+        // Process images sequentially to prevent memory spikes
+        for url in limitedUrls {
+            // Check memory before each image
+            let memoryCheck = getCurrentMemoryUsage()
+            if memoryCheck > 600 * 1024 * 1024 { // 600MB absolute limit
+                logger.warning("Aborting preload due to memory limit: \(self.formatBytes(memoryCheck))")
+                break
             }
+
+            await preloadBatch([url])
         }
 
         let elapsed = CFAbsoluteTimeGetCurrent() - startTime
@@ -324,28 +376,38 @@ protocol ImageCacheServiceProtocol {
 
     // MARK: - Private Optimization Methods
 
-    /// Loads image with size and memory optimizations
+    /// Loads image with aggressive memory optimization
     private func loadImageOptimized(from url: URL) -> NSImage? {
         guard let image = NSImage(contentsOf: url) else { return nil }
 
-        // Check if image is too large and needs downsampling
         let imageSize = image.size
-        let maxDimension: CGFloat = 4096 // Reasonable maximum
+        let pixelCount = imageSize.width * imageSize.height
 
-        if imageSize.width > maxDimension || imageSize.height > maxDimension {
-            return createDownsampledImage(from: image, maxDimension: maxDimension)
+        // Much more aggressive downsampling for large images
+        let maxPixels: CGFloat = 2_000_000 // Max 2MP for full cache
+        let maxDimension: CGFloat = 2048 // Max 2K resolution
+
+        if pixelCount > maxPixels || imageSize.width > maxDimension || imageSize.height > maxDimension {
+            let targetPixels = min(maxPixels, pixelCount)
+            let scale = sqrt(targetPixels / pixelCount)
+            let newSize = CGSize(
+                width: min(imageSize.width * scale, maxDimension),
+                height: min(imageSize.height * scale, maxDimension)
+            )
+
+            return createDownsampledImage(from: image, targetSize: newSize)
         }
 
         return image
     }
 
     /// Creates optimized thumbnail for large images
-    private func createThumbnail(from image: NSImage, maxSize: CGFloat = 512) -> NSImage? {
+    private func createThumbnail(from image: NSImage, maxSize: CGFloat = 300) -> NSImage? {
         let originalSize = image.size
-
-        // Calculate thumbnail size maintaining aspect ratio
         let scale = min(maxSize / originalSize.width, maxSize / originalSize.height)
-        guard scale < 1.0 else { return image } // Don't upscale
+
+        // Only create thumbnail if we can reduce size significantly
+        guard scale < 0.8 else { return image }
 
         let thumbnailSize = CGSize(
             width: originalSize.width * scale,
@@ -377,22 +439,28 @@ protocol ImageCacheServiceProtocol {
         return newImage
     }
 
-    /// Determines cache priority based on image characteristics
+    /// Determines cache priority with better differentiation
     private func determineCachePriority(url: URL, imageSize: CGSize) -> Int {
         var priority = 1
 
-        // Larger images get higher priority (more expensive to reload)
-        let pixelCount = imageSize.width * imageSize.height
-        if pixelCount > 2_000_000 { priority += 2 } // > 2MP
-        else if pixelCount > 500_000 { priority += 1 } // > 0.5MP
-
-        // Recent files get higher priority
         let fileName = url.lastPathComponent.lowercased()
-        if fileName.contains("recent") || fileName.contains("new") {
-            priority += 1
+        let pixelCount = imageSize.width * imageSize.height
+
+        // Size-based priority (larger = higher to avoid reloading cost)
+        if pixelCount > 4_000_000 { priority += 3 } // > 4MP
+        else if pixelCount > 2_000_000 { priority += 2 } // > 2MP
+        else if pixelCount > 1_000_000 { priority += 1 } // > 1MP
+
+        // File type hints
+        if fileName.contains("preview") || fileName.contains("thumb") {
+            priority += 2 // Previews are accessed frequently
         }
 
-        return min(priority, 5) // Cap at 5
+        if fileName.contains("current") || fileName.contains("active") {
+            priority += 3 // Currently active wallpapers
+        }
+
+        return min(priority, 8) // Cap at 8 for better scoring range
     }
 
     /// Updates access metadata for cache management
@@ -410,7 +478,7 @@ protocol ImageCacheServiceProtocol {
         return currentSize > Int(Double(limit) * 0.8) || isUnderMemoryPressure
     }
 
-    /// Performs smart eviction based on access patterns and priority
+    /// Much more aggressive smart eviction
     private func performSmartEviction() async {
         logger.debug("Performing smart cache eviction")
 
@@ -420,49 +488,108 @@ protocol ImageCacheServiceProtocol {
             if let metadata = metadataCache.object(forKey: key) {
                 scoredEntries.append((key, metadata.retentionScore))
             } else {
-                // If metadata is missing, remove the entry
-                removeCachedImage(for: URL(string: key as String)!)
+                // Remove orphaned entries
+                imageCache.removeObject(forKey: key)
+                thumbnailCache.removeObject(forKey: key)
+                cachedImageKeys.remove(key)
             }
         }
+
+        guard !scoredEntries.isEmpty else { return }
 
         // Sort by score (lowest score first for eviction)
         scoredEntries.sort { $0.score < $1.score }
 
-        // Evict until cache size is below target
-        let targetSize = Int(Double(maxCacheSize) * 1024 * 1024 * 0.7) // Target 70% of max
-        var currentSize = getCacheSize()
+        // More aggressive target - keep cache smaller
+        let targetSize = Int(Double(maxCacheSize) * 1024 * 1024 * 0.5) // Target 50% of max
+        var currentSize = getActualCacheSize()
+        var evictedCount = 0
 
         for (key, score) in scoredEntries {
-            if currentSize > targetSize {
+            if currentSize > targetSize && evictedCount < 10 { // Limit evictions per cycle
                 removeCachedImage(for: URL(string: key as String)!)
-                currentSize = getCacheSize() // Recalculate after removal
-                logger.debug("Evicted image with score \(String(format: "%.2f", score)): \(key.lastPathComponent)")
+                currentSize = getActualCacheSize()
+                evictedCount += 1
+                logger.debug("Evicted (\(evictedCount)): \(key.lastPathComponent) (score: \(String(format: "%.2f", score)))")
             } else {
-                break // Stop if target size is reached
+                break
             }
         }
 
-        self.logger.debug("Smart cache eviction completed. Current size: \(self.formatBytes(currentSize))")
+        logger.debug("Smart eviction completed. Evicted \(evictedCount) images. Size: \(self.formatBytes(currentSize))")
     }
 
-    /// Aggressive cleanup under memory pressure
+    /// Get more accurate cache size estimation
+    private func getActualCacheSize() -> Int {
+        // Use NSCache's internal tracking for better accuracy
+        let mainSize = min(imageCache.totalCostLimit, maxCacheSize * 1024 * 1024 / 2)
+        let thumbSize = min(thumbnailCache.totalCostLimit, maxCacheSize * 1024 * 1024 / 4)
+        return mainSize + thumbSize
+    }
+
+    /// Get current app memory usage
+    private func getCurrentMemoryUsage() -> Int {
+        var info = mach_task_basic_info()
+        var count = mach_msg_type_number_t(MemoryLayout<mach_task_basic_info>.size)/4
+
+        let result: kern_return_t = withUnsafeMutablePointer(to: &info) {
+            $0.withMemoryRebound(to: integer_t.self, capacity: 1) {
+                task_info(mach_task_self_, task_flavor_t(MACH_TASK_BASIC_INFO), $0, &count)
+            }
+        }
+
+        return result == KERN_SUCCESS ? Int(info.resident_size) : 0
+    }
+
+    /// Format bytes for logging
+    private func formatBytes(_ bytes: Int) -> String {
+        let formatter = ByteCountFormatter()
+        formatter.countStyle = .memory
+        return formatter.string(fromByteCount: Int64(bytes))
+    }
+
+    /// Ultra-aggressive cleanup for memory pressure
     private func performAggressiveCleanup() async {
-        logger.warning("Performing aggressive cache cleanup due to memory pressure")
+        logger.warning("AGGRESSIVE CLEANUP: Memory pressure detected")
 
-        // Clear thumbnail cache first
+        // Clear 90% of caches
+        imageCache.removeAllObjects()
         thumbnailCache.removeAllObjects()
+        cachedImageKeys.removeAll()
 
-        // Reduce main cache significantly
-        imageCache.countLimit = max(imageCache.countLimit / 4, 5)
+        // Reset statistics
+        cacheHits = 0
+        cacheMisses = 0
+        preloadRequests = 0
 
-        // Mark as under pressure
+        // Drastically reduce cache limits
+        imageCache.countLimit = 5
+        imageCache.totalCostLimit = maxCacheSize * 1024 * 1024 / 10 // 10% of original
+
+        thumbnailCache.countLimit = 10
+        thumbnailCache.totalCostLimit = maxCacheSize * 1024 * 1024 / 20 // 5% of original
+
         isUnderMemoryPressure = true
         lastMemoryWarning = Date()
 
-        // Reset after cooldown period
-        DispatchQueue.main.asyncAfter(deadline: .now() + memoryWarningCooldown) { [weak self] in
-            self?.isUnderMemoryPressure = false
+        // Longer cooldown period
+        DispatchQueue.main.asyncAfter(deadline: .now() + 60) { [weak self] in
+            self?.recoverFromMemoryPressure()
         }
+    }
+
+    /// Gradually recover cache limits after memory pressure
+    private func recoverFromMemoryPressure() {
+        logger.info("Recovering from memory pressure")
+
+        // Gradually restore cache limits to 50% of original
+        imageCache.countLimit = min(10, maxCacheSize / 8)
+        imageCache.totalCostLimit = maxCacheSize * 1024 * 1024 / 4 // 25% of original
+
+        thumbnailCache.countLimit = 25
+        thumbnailCache.totalCostLimit = maxCacheSize * 1024 * 1024 / 8 // 12.5% of original
+
+        isUnderMemoryPressure = false
     }
 
     /// Background cleanup when app is inactive
@@ -472,6 +599,9 @@ protocol ImageCacheServiceProtocol {
         // Reduce cache limits when app is in background
         imageCache.countLimit = max(imageCache.countLimit / 2, 5)
         thumbnailCache.countLimit = max(thumbnailCache.countLimit / 2, 10)
+
+        // Clear some cached content to free memory
+        await performSmartEviction()
     }
 
     /// Preloads a batch of images using TaskGroup for structured concurrency
@@ -519,13 +649,7 @@ protocol ImageCacheServiceProtocol {
         return min(estimatedSize, 100 * 1024 * 1024)
     }
 
-    /// Formats bytes for human-readable output
-    private func formatBytes(_ bytes: Int) -> String {
-        let formatter = ByteCountFormatter()
-        formatter.allowedUnits = [.useMB, .useKB, .useBytes]
-        formatter.countStyle = .memory
-        return formatter.string(fromByteCount: Int64(bytes))
-    }
+
 }
 
 // MARK: - Performance Monitoring

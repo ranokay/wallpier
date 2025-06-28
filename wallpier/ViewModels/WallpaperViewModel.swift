@@ -27,6 +27,7 @@ final class WallpaperViewModel: ObservableObject {
     @Published var isRunning = false
     @Published var foundImages: [ImageFile] = []
     @Published var currentImage: ImageFile?
+    @Published var currentImages: [NSScreen: ImageFile] = [:] // For multi-monitor support
     @Published var isScanning = false
     @Published var statusMessage = ""
     @Published var hasError = false
@@ -35,6 +36,7 @@ final class WallpaperViewModel: ObservableObject {
     @Published var scanProgress = 0
     @Published var timeUntilNextChange: TimeInterval = 0
     @Published var cycleProgress: Double = 0.0
+    @Published var availableScreens: [(screen: NSScreen, displayName: String)] = []
 
     // MARK: - Settings Integration
 
@@ -60,9 +62,14 @@ final class WallpaperViewModel: ObservableObject {
     private var averageChangeTime: TimeInterval = 0
     private var changeCount = 0
 
+    /// Average time it takes to change wallpaper (for performance monitoring)
+    public var averageWallpaperChangeTime: TimeInterval {
+        return averageChangeTime
+    }
+
     // Intelligent preloading
     private var preloadingTask: Task<Void, Never>?
-    private let preloadDistance = 3 // Preload next 3 images
+    private let preloadDistance = 1 // Conservative: preload only next 1 image
 
     // UI update throttling
     private var lastUIUpdate = Date()
@@ -77,12 +84,13 @@ final class WallpaperViewModel: ObservableObject {
 
         self.wallpaperService = wallpaperService ?? WallpaperService()
         self.imageScanner = imageScanner ?? ImageScannerService()
-        self.imageCache = imageCache ?? ImageCacheService()
+        self.imageCache = imageCache ?? ImageCacheService(maxCacheSizeMB: 50) // Reduced to 50MB for large images
         self.fileMonitor = fileMonitor ?? FileMonitorService()
 
         setupFileMonitoring()
         setupBindings()
         loadSavedState()
+        loadAvailableScreens()
 
         logger.info("WallpaperViewModel initialized with performance optimizations")
     }
@@ -110,8 +118,6 @@ final class WallpaperViewModel: ObservableObject {
         selectedFolderPath = folderPath
         await scanFolder(folderPath, showProgress: false)
     }
-
-    
 
     func startCycling() async {
         logger.info("Starting wallpaper cycling")
@@ -171,6 +177,54 @@ final class WallpaperViewModel: ObservableObject {
         logger.info("Wallpaper cycling stopped")
     }
 
+    /// Sets a specific wallpaper on a specific screen (for manual selection)
+    func setWallpaperForScreen(_ imageFile: ImageFile, screen: NSScreen) async {
+        do {
+            let startTime = CFAbsoluteTimeGetCurrent()
+
+            // Preload the image
+            let _ = await imageCache.preloadImage(from: imageFile.url)
+
+            // Set wallpaper for the specific screen
+            try await wallpaperService.setWallpaperForScreen(imageFile.url, screen: screen)
+
+            let elapsed = CFAbsoluteTimeGetCurrent() - startTime
+
+            await MainActor.run {
+                // Update the specific screen's image
+                currentImages[screen] = imageFile
+
+                // Update main current image if this is the main screen
+                if screen == NSScreen.main {
+                    currentImage = imageFile
+                }
+
+                hasError = false
+                updateChangeTimeStatistics(elapsed)
+
+                let screenName = availableScreens.first { $0.screen == screen }?.displayName ?? "Screen"
+                let message = "Set wallpaper on \(screenName): \(imageFile.name)"
+                updateStatus(message)
+
+                logger.info("\(message)")
+            }
+
+        } catch {
+            await MainActor.run {
+                hasError = true
+                errorMessage = error.localizedDescription
+                updateStatus("Failed to set wallpaper: \(error.localizedDescription)")
+
+                logger.error("Failed to set wallpaper for screen: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    /// Sets a specific wallpaper on all screens
+    func setWallpaperOnAllScreens(_ imageFile: ImageFile) async {
+        await setWallpaper(imageFile)
+    }
+
     /// Manually advances to next wallpaper
     func goToNextImage() {
         Task {
@@ -206,6 +260,21 @@ final class WallpaperViewModel: ObservableObject {
                 Task {
                     await scanFolder(folderPath, showProgress: true)
                 }
+            } else {
+                // Clear current state if no folder is selected
+                foundImages = []
+                currentImage = nil
+                updateStatus("No folder selected")
+            }
+        } else if newSettings.folderPath != nil {
+            // Even if it's the same folder, update the current image display
+            // This handles the case where user selects the same folder again
+            selectedFolderPath = newSettings.folderPath
+            currentImage = cycleConfiguration.currentImage
+
+            // Refresh the status if we have images
+            if !foundImages.isEmpty {
+                updateStatus("Folder: \(newSettings.folderPath?.lastPathComponent ?? "Unknown")")
             }
         }
 
@@ -256,6 +325,14 @@ final class WallpaperViewModel: ObservableObject {
         }
     }
 
+    /// Loads available screens for multi-monitor support
+    private func loadAvailableScreens() {
+        if let wallpaperService = wallpaperService as? WallpaperService {
+            self.availableScreens = wallpaperService.getScreensInfo()
+            logger.info("Loaded \(self.availableScreens.count) available screen(s)")
+        }
+    }
+
     /// Handles settings changes with intelligent updates
     private func handleSettingsChange(oldValue: WallpaperSettings) {
         // Update cache configuration if needed
@@ -275,7 +352,7 @@ final class WallpaperViewModel: ObservableObject {
         }
     }
 
-        /// Scans folder with optimized progress reporting
+    /// Scans folder with optimized progress reporting
     private func scanFolder(_ folderPath: URL, showProgress: Bool) async {
         logger.info("Starting optimized folder scan: \(folderPath.path)")
 
@@ -368,50 +445,116 @@ final class WallpaperViewModel: ObservableObject {
         }
     }
 
-    /// Performs intelligent preloading based on cycle position
+    /// Performs conservative preloading based on cycle position and memory pressure
     private func performIntelligentPreloading() async {
+        // Check memory pressure first
+        let memoryUsage = getCurrentMemoryUsage()
+        guard memoryUsage < 500 * 1024 * 1024 else { // 500MB limit
+            logger.warning("Skipping preload due to memory pressure: \(self.formatBytes(memoryUsage))")
+            return
+        }
 
         let currentIndex = cycleConfiguration.currentIndex
         var urlsToPreload: [URL] = []
 
-        // Preload next few images in sequence
-        for i in 1...preloadDistance {
+        // Much more conservative preloading - only 1-2 images ahead
+        let conservativeDistance = min(2, preloadDistance)
+
+        // Preload only next image(s)
+        for i in 1...conservativeDistance {
             let nextIndex = (currentIndex + i) % foundImages.count
             if nextIndex < foundImages.count {
                 urlsToPreload.append(foundImages[nextIndex].url)
             }
         }
 
-        // Also preload previous images for smooth navigation
-        for i in 1...min(2, preloadDistance) {
-            let prevIndex = currentIndex - i < 0 ? foundImages.count + (currentIndex - i) : currentIndex - i
-            if prevIndex >= 0 && prevIndex < foundImages.count {
-                urlsToPreload.append(foundImages[prevIndex].url)
+        // No previous image preloading to save memory
+
+        guard !urlsToPreload.isEmpty else { return }
+
+        await imageCache.preloadImages(urlsToPreload, priority: .utility)
+        logger.debug("Conservatively preloaded \(urlsToPreload.count) images")
+    }
+
+    /// Gets current app memory usage
+    private func getCurrentMemoryUsage() -> Int {
+        var info = mach_task_basic_info()
+        var count = mach_msg_type_number_t(MemoryLayout<mach_task_basic_info>.size)/4
+
+        let result: kern_return_t = withUnsafeMutablePointer(to: &info) {
+            $0.withMemoryRebound(to: integer_t.self, capacity: 1) {
+                task_info(mach_task_self_, task_flavor_t(MACH_TASK_BASIC_INFO), $0, &count)
             }
         }
 
-        await imageCache.preloadImages(urlsToPreload, priority: .utility)
-        logger.debug("Preloaded \(urlsToPreload.count) images")
+        return result == KERN_SUCCESS ? Int(info.resident_size) : 0
     }
 
-    /// Sets current wallpaper with performance optimization
+    /// Format bytes for logging
+    private func formatBytes(_ bytes: Int) -> String {
+        let formatter = ByteCountFormatter()
+        formatter.countStyle = .memory
+        return formatter.string(fromByteCount: Int64(bytes))
+    }
+
+    /// Sets current wallpaper with performance optimization and multi-monitor support
     private func setCurrentWallpaper() async {
-        guard let imageFile = cycleConfiguration.currentImage else {
-            updateStatus("No current image available")
+        guard !foundImages.isEmpty else {
+            updateStatus("No images available")
             return
         }
 
-        await setWallpaper(imageFile)
+        if settings.multiMonitorSettings.useSameWallpaperOnAllMonitors {
+            // Use single wallpaper for all monitors
+            guard let imageFile = cycleConfiguration.currentImage else {
+                updateStatus("No current image available")
+                return
+            }
+            await setWallpaper(imageFile)
+        } else {
+            // Set different wallpapers for each monitor from the start
+            let screens = NSScreen.screens
+            var imageURLs: [URL] = []
+            var initialImages: [NSScreen: ImageFile] = [:]
+            var usedIndices: Set<Int> = []
+
+            for (screenIndex, screen) in screens.enumerated() {
+                let imageIndex = screenIndex % foundImages.count
+                var finalIndex = imageIndex
+
+                // Ensure we don't use the same image on multiple screens (if we have enough images)
+                if foundImages.count >= screens.count {
+                    var attempts = 0
+                    while usedIndices.contains(finalIndex) && attempts < foundImages.count {
+                        finalIndex = (finalIndex + 1) % foundImages.count
+                        attempts += 1
+                    }
+                }
+
+                usedIndices.insert(finalIndex)
+                let imageFile = foundImages[finalIndex]
+                initialImages[screen] = imageFile
+                imageURLs.append(imageFile.url)
+            }
+
+            await setMultipleWallpapers(imageURLs, newImages: initialImages)
+        }
     }
 
     /// Advances to next wallpaper
     private func setNextWallpaper() async {
-        guard let nextImage = cycleConfiguration.advanceToNext() else {
-            updateStatus("No next image available")
-            return
+        if settings.multiMonitorSettings.useSameWallpaperOnAllMonitors {
+            // Standard single-image cycling
+            guard let nextImage = cycleConfiguration.advanceToNext() else {
+                updateStatus("No next image available")
+                return
+            }
+            await setWallpaper(nextImage)
+        } else {
+            // Multi-monitor cycling with different images per screen
+            await setNextWallpaperMultiMonitor()
         }
 
-        await setWallpaper(nextImage)
         updateCycleProgress()
 
         // Update preloading based on new position
@@ -420,16 +563,177 @@ final class WallpaperViewModel: ObservableObject {
 
     /// Goes to previous wallpaper
     private func setPreviousWallpaper() async {
-        guard let prevImage = cycleConfiguration.goToPrevious() else {
-            updateStatus("No previous image available")
-            return
+        if settings.multiMonitorSettings.useSameWallpaperOnAllMonitors {
+            // Standard single-image cycling
+            guard let prevImage = cycleConfiguration.goToPrevious() else {
+                updateStatus("No previous image available")
+                return
+            }
+            await setWallpaper(prevImage)
+        } else {
+            // Multi-monitor cycling with different images per screen
+            await setPreviousWallpaperMultiMonitor()
         }
 
-        await setWallpaper(prevImage)
         updateCycleProgress()
     }
 
-        /// Sets wallpaper with caching and error handling
+    /// Sets next wallpaper for multi-monitor setup
+    private func setNextWallpaperMultiMonitor() async {
+        guard !foundImages.isEmpty else {
+            updateStatus("No images available")
+            return
+        }
+
+        let screens = NSScreen.screens
+        var imageURLs: [URL] = []
+        var nextImages: [NSScreen: ImageFile] = [:]
+
+        if settings.multiMonitorSettings.useSameWallpaperOnAllMonitors {
+            // Use same wallpaper on all monitors - advance from current image
+            let currentIndex = cycleConfiguration.currentIndex
+            let nextIndex = (currentIndex + 1) % foundImages.count
+            let nextImage = foundImages[nextIndex]
+
+            for screen in screens {
+                nextImages[screen] = nextImage
+                imageURLs.append(nextImage.url)
+            }
+        } else {
+            // Use different wallpapers on each monitor
+            var usedIndices: Set<Int> = []
+
+            for (screenIndex, screen) in screens.enumerated() {
+                var nextIndex: Int
+
+                if let currentImageForScreen = currentImages[screen],
+                   let currentIndex = foundImages.firstIndex(of: currentImageForScreen) {
+                    // Advance from current image for this screen
+                    nextIndex = (currentIndex + 1) % foundImages.count
+                } else {
+                    // If no current image for this screen, start with screen-specific offset
+                    nextIndex = screenIndex % foundImages.count
+                }
+
+                // Ensure we don't use the same image on multiple screens (if we have enough images)
+                if foundImages.count >= screens.count {
+                    var attempts = 0
+                    while usedIndices.contains(nextIndex) && attempts < foundImages.count {
+                        nextIndex = (nextIndex + 1) % foundImages.count
+                        attempts += 1
+                    }
+                }
+
+                usedIndices.insert(nextIndex)
+                let nextImage = foundImages[nextIndex]
+                nextImages[screen] = nextImage
+                imageURLs.append(nextImage.url)
+            }
+        }
+
+        await setMultipleWallpapers(imageURLs, newImages: nextImages)
+    }
+
+    /// Sets previous wallpaper for multi-monitor setup
+    private func setPreviousWallpaperMultiMonitor() async {
+        guard !foundImages.isEmpty else {
+            updateStatus("No images available")
+            return
+        }
+
+        let screens = NSScreen.screens
+        var imageURLs: [URL] = []
+        var prevImages: [NSScreen: ImageFile] = [:]
+
+        if settings.multiMonitorSettings.useSameWallpaperOnAllMonitors {
+            // Use same wallpaper on all monitors - go back from current image
+            let currentIndex = cycleConfiguration.currentIndex
+            let prevIndex = currentIndex == 0 ? foundImages.count - 1 : currentIndex - 1
+            let prevImage = foundImages[prevIndex]
+
+            for screen in screens {
+                prevImages[screen] = prevImage
+                imageURLs.append(prevImage.url)
+            }
+        } else {
+            // Use different wallpapers on each monitor
+            var usedIndices: Set<Int> = []
+
+            for (screenIndex, screen) in screens.enumerated() {
+                var prevIndex: Int
+
+                if let currentImageForScreen = currentImages[screen],
+                   let currentIndex = foundImages.firstIndex(of: currentImageForScreen) {
+                    // Go back from current image for this screen
+                    prevIndex = currentIndex == 0 ? foundImages.count - 1 : currentIndex - 1
+                } else {
+                    // If no current image for this screen, start with screen-specific offset
+                    prevIndex = screenIndex % foundImages.count
+                }
+
+                // Ensure we don't use the same image on multiple screens (if we have enough images)
+                if foundImages.count >= screens.count {
+                    var attempts = 0
+                    while usedIndices.contains(prevIndex) && attempts < foundImages.count {
+                        prevIndex = prevIndex == 0 ? foundImages.count - 1 : prevIndex - 1
+                        attempts += 1
+                    }
+                }
+
+                usedIndices.insert(prevIndex)
+                let prevImage = foundImages[prevIndex]
+                prevImages[screen] = prevImage
+                imageURLs.append(prevImage.url)
+            }
+        }
+
+        await setMultipleWallpapers(imageURLs, newImages: prevImages)
+    }
+
+        /// Sets multiple wallpapers for multi-monitor setup
+    private func setMultipleWallpapers(_ imageURLs: [URL], newImages: [NSScreen: ImageFile]) async {
+        let startTime = CFAbsoluteTimeGetCurrent()
+
+        do {
+            // Skip aggressive preloading to prevent memory explosion
+            // Images will be loaded on-demand by the wallpaper service
+            logger.debug("Setting multiple wallpapers for monitors: \(imageURLs.count) images")
+
+            try await wallpaperService.setWallpaperForMultipleMonitors(imageURLs, multiMonitorSettings: settings.multiMonitorSettings)
+
+            let elapsed = CFAbsoluteTimeGetCurrent() - startTime
+
+            await MainActor.run {
+                // Update currentImages AFTER successful wallpaper setting to ensure sync
+                currentImages = newImages
+
+                // Update current image to the first screen's image for compatibility
+                if let firstScreen = NSScreen.screens.first,
+                   let firstImage = newImages[firstScreen] {
+                    currentImage = firstImage
+                }
+
+                hasError = false
+                updateChangeTimeStatistics(elapsed)
+
+                let message = "Set wallpapers for \(imageURLs.count) screen(s) (\(String(format: "%.3f", elapsed))s)"
+                updateStatus(message)
+
+                logger.info("\(message)")
+            }
+
+        } catch {
+            await MainActor.run {
+                hasError = true
+                errorMessage = error.localizedDescription
+                updateStatus("Failed to set wallpapers: \(error.localizedDescription)")
+
+                logger.error("Failed to set multi-monitor wallpapers: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    /// Sets wallpaper with caching and error handling
     private func setWallpaper(_ imageFile: ImageFile) async {
         do {
             let startTime = CFAbsoluteTimeGetCurrent()
@@ -437,13 +741,26 @@ final class WallpaperViewModel: ObservableObject {
             // Try to get from cache first for faster transitions
             let _ = await imageCache.preloadImage(from: imageFile.url)
 
-            // Set wallpaper on background queue to avoid UI blocking
-            try await wallpaperService.setWallpaper(imageFile.url)
+            // Set wallpaper with multi-monitor support
+            try await wallpaperService.setWallpaper(imageFile.url, multiMonitorSettings: settings.multiMonitorSettings)
 
             let elapsed = CFAbsoluteTimeGetCurrent() - startTime
 
             await MainActor.run {
                 currentImage = imageFile
+
+                // Update all screens with same image if using same wallpaper mode
+                if settings.multiMonitorSettings.useSameWallpaperOnAllMonitors {
+                    for screen in NSScreen.screens {
+                        currentImages[screen] = imageFile
+                    }
+                } else {
+                    // Only update the main screen
+                    if let mainScreen = NSScreen.main {
+                        currentImages[mainScreen] = imageFile
+                    }
+                }
+
                 hasError = false
 
                 updateChangeTimeStatistics(elapsed)

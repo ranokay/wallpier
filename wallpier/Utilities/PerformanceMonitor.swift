@@ -319,3 +319,81 @@ extension PerformanceMonitor {
         return result
     }
 }
+
+// MARK: - Image Preview Utilities
+
+extension PerformanceMonitor {
+    /// Maximum size for preview images (in pixels)
+    static let maxPreviewSize: CGFloat = 400
+
+    /// Loads an optimized preview image with size constraints
+    static func loadOptimizedPreview(from url: URL, maxSize: CGFloat = maxPreviewSize) async -> NSImage? {
+        return await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async {
+                guard let originalImage = NSImage(contentsOf: url) else {
+                    continuation.resume(returning: nil)
+                    return
+                }
+
+                let optimizedImage = self.resizeImage(originalImage, to: maxSize)
+                DispatchQueue.main.async {
+                    continuation.resume(returning: optimizedImage)
+                }
+            }
+        }
+    }
+
+    /// Resizes an image to fit within the specified maximum dimension while maintaining aspect ratio
+    private static func resizeImage(_ image: NSImage, to maxSize: CGFloat) -> NSImage {
+        let originalSize = image.size
+
+        // If image is already smaller than max size, return original
+        if originalSize.width <= maxSize && originalSize.height <= maxSize {
+            return image
+        }
+
+        // Calculate scale factor to fit within maxSize
+        let scale = min(maxSize / originalSize.width, maxSize / originalSize.height)
+        let newSize = NSSize(width: originalSize.width * scale, height: originalSize.height * scale)
+
+        // Create new image with optimized size
+        let newImage = NSImage(size: newSize)
+        newImage.lockFocus()
+
+        // Use high quality interpolation
+        NSGraphicsContext.current?.imageInterpolation = .high
+
+        // Draw the resized image
+        image.draw(in: NSRect(origin: .zero, size: newSize),
+                  from: NSRect(origin: .zero, size: originalSize),
+                  operation: .copy,
+                  fraction: 1.0)
+
+        newImage.unlockFocus()
+
+        return newImage
+    }
+
+    /// Loads multiple preview images for multi-monitor setup
+    static func loadMultipleOptimizedPreviews(from urls: [URL], maxSize: CGFloat = maxPreviewSize) async -> [NSImage?] {
+        await withTaskGroup(of: (Int, NSImage?).self) { group in
+            // Add tasks for each URL
+            for (index, url) in urls.enumerated() {
+                group.addTask {
+                    let image = await loadOptimizedPreview(from: url, maxSize: maxSize)
+                    return (index, image)
+                }
+            }
+
+            // Collect results in order
+            var results: [NSImage?] = Array(repeating: nil, count: urls.count)
+            for await (index, image) in group {
+                if index < results.count {
+                    results[index] = image
+                }
+            }
+
+            return results
+        }
+    }
+}

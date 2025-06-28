@@ -40,6 +40,16 @@ struct wallpierApp: App {
                 .onReceive(NotificationCenter.default.publisher(for: .openSettings)) { _ in
                     showingSettings = true
                 }
+                .onReceive(NotificationCenter.default.publisher(for: .openWallpaperGallery)) { _ in
+                    // Open wallpaper gallery - trigger the browse button action
+                    if let window = NSApp.mainWindow?.contentView {
+                        NotificationCenter.default.post(name: Notification.Name("TriggerWallpaperGallery"), object: nil)
+                    }
+                }
+                .onReceive(NotificationCenter.default.publisher(for: .selectFolder)) { _ in
+                    // Trigger folder selection
+                    settingsViewModel.selectFolder()
+                }
                 .sheet(isPresented: $showingSettings) {
                     SettingsView(viewModel: settingsViewModel)
                         .environmentObject(systemService)
@@ -47,7 +57,10 @@ struct wallpierApp: App {
                 .onAppear {
                     // Initial system setup
                     Task {
-                        let _ = await systemService.requestPermissions()
+                        // Only request permissions if this is first launch and no folder is selected
+                        if isFirstLaunch() && settingsViewModel.settings.folderPath == nil {
+                            let _ = await systemService.requestPermissions()
+                        }
                         await setupInitialAppBehavior()
                     }
                 }
@@ -101,7 +114,18 @@ struct wallpierApp: App {
         .windowResizability(.contentSize)
         .defaultPosition(.center)
 
-        // Menu Bar Extra (Status Item)
+        // Menu Bar Extra (Status Item) - Enhanced version
+        WindowGroup(id: "status-menu") {
+            StatusMenuView(
+                wallpaperViewModel: wallpaperViewModel,
+                settingsViewModel: settingsViewModel
+            )
+        }
+        .windowStyle(.hiddenTitleBar)
+        .windowResizability(.contentSize)
+        .defaultSize(width: 0, height: 0)
+
+        // Alternative SwiftUI Menu Bar (backup)
         MenuBarExtra("Wallpier", systemImage: "photo.on.rectangle.angled") {
             StatusMenuContent(
                 wallpaperViewModel: wallpaperViewModel,
@@ -119,8 +143,8 @@ struct wallpierApp: App {
         let hideDock = settingsViewModel.settings.systemIntegration?.hideDockIcon ?? false
         systemService.configureDockVisibility(!hideDock)
 
-        // Show initial setup dialogs if this is first launch
-        if isFirstLaunch() {
+        // Show initial setup dialogs only if this is first launch and no folder selected
+        if isFirstLaunch() && settingsViewModel.settings.folderPath == nil {
             await showFirstLaunchSetup()
         }
     }
@@ -209,7 +233,7 @@ struct StatusMenuContent: View {
                     Button(action: toggleCycling) {
                         Image(systemName: wallpaperViewModel.isRunning ? "stop.fill" : "play.fill")
                     }
-                    .disabled(!wallpaperViewModel.canStartCycling && !wallpaperViewModel.isRunning)
+                    .disabled(wallpaperViewModel.isRunning ? false : !wallpaperViewModel.canStartCycling)
 
                     Spacer()
 

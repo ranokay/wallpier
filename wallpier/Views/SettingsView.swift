@@ -272,13 +272,6 @@ struct DisplaySettingsView: View {
                            isOn: $viewModel.settings.multiMonitorSettings.useSameWallpaperOnAllMonitors)
                         .help("Apply the same wallpaper to all connected displays")
 
-                    if !viewModel.settings.multiMonitorSettings.useSameWallpaperOnAllMonitors {
-                        Toggle("Synchronize cycling across monitors",
-                               isOn: $viewModel.settings.multiMonitorSettings.synchronizeCycling)
-                            .help("Change wallpapers on all monitors at the same time")
-                            .disabled(viewModel.settings.multiMonitorSettings.useSameWallpaperOnAllMonitors)
-                    }
-
                     // Monitor count info
                     let screenCount = NSScreen.screens.count
                     HStack {

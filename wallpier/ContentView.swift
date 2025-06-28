@@ -12,10 +12,15 @@ struct ContentView: View {
     @StateObject private var settingsViewModel: SettingsViewModel
     @State private var showingSettings = false
     @State private var showingAbout = false
+    @State private var showingWallpaperGallery = false
+    @State private var selectedScreenForGallery: NSScreen?
 
     init() {
         let settings = WallpaperSettings.load()
         self._settingsViewModel = StateObject(wrappedValue: SettingsViewModel(settings: settings))
+
+        // Setup the callback after the StateObject is created
+        // We'll do this in onAppear since we can't access StateObject's wrappedValue in init
     }
 
     var body: some View {
@@ -57,7 +62,7 @@ struct ContentView: View {
                             .frame(maxWidth: .infinity)
                         }
                         .buttonStyle(.borderedProminent)
-                        .disabled(!wallpaperViewModel.canStartCycling)
+                        .disabled(wallpaperViewModel.isRunning ? false : !wallpaperViewModel.canStartCycling)
 
                         // Manual Navigation
                         HStack {
@@ -181,31 +186,28 @@ struct ContentView: View {
                 .background(Color(NSColor.controlBackgroundColor))
                 .cornerRadius(8)
 
-                // Current Image Preview
-                if let currentImage = wallpaperViewModel.currentImage {
-                    CurrentImageView(imageFile: currentImage)
-                } else {
-                    // Placeholder
-                    VStack(spacing: 16) {
-                        Image(systemName: "photo.on.rectangle.angled")
-                            .font(.system(size: 64))
-                            .foregroundColor(.secondary)
-
-                        VStack(spacing: 8) {
-                            Text("No Images Selected")
-                                .font(.title3)
-                                .fontWeight(.medium)
-
-                            Text("Choose a folder with images to start cycling wallpapers")
-                                .font(.body)
-                                .foregroundColor(.secondary)
-                                .multilineTextAlignment(.center)
-
-                            Button("Select Folder", action: selectFolder)
-                                .buttonStyle(.borderedProminent)
-                        }
+                // Current Image Preview(s)
+                if wallpaperViewModel.settings.multiMonitorSettings.useSameWallpaperOnAllMonitors {
+                    // Single image preview
+                    if let currentImage = wallpaperViewModel.currentImage {
+                        OptimizedImageView(imageFile: currentImage)
+                            .id(currentImage.url)
+                    } else {
+                        placeholderView
                     }
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                                } else if !wallpaperViewModel.currentImages.isEmpty {
+                    // Multi-monitor preview
+                    MultiMonitorPreviewView(
+                        currentImages: wallpaperViewModel.currentImages,
+                        availableScreens: wallpaperViewModel.availableScreens,
+                        isInteractive: !wallpaperViewModel.isRunning,
+                        onScreenTapped: { screen in
+                            selectedScreenForGallery = screen
+                            showingWallpaperGallery = true
+                        }
+                    )
+                } else {
+                    placeholderView
                 }
 
                 // Image Queue Info
@@ -221,9 +223,18 @@ struct ContentView: View {
 
                         Spacer()
 
-                        Button("Rescan", action: { wallpaperViewModel.rescanCurrentFolder() })
+                        HStack(spacing: 8) {
+                            Button("Rescan", action: { wallpaperViewModel.rescanCurrentFolder() })
+                                .buttonStyle(.bordered)
+                                .disabled(wallpaperViewModel.isScanning)
+
+                            Button("Browse Wallpapers") {
+                                selectedScreenForGallery = nil
+                                showingWallpaperGallery = true
+                            }
                             .buttonStyle(.bordered)
-                            .disabled(wallpaperViewModel.isScanning)
+                            .disabled(wallpaperViewModel.foundImages.isEmpty)
+                        }
                     }
                     .padding()
                     .background(Color(NSColor.controlBackgroundColor))
@@ -240,11 +251,40 @@ struct ContentView: View {
         .sheet(isPresented: $showingAbout) {
             AboutView()
         }
+        .sheet(isPresented: $showingWallpaperGallery) {
+            WallpaperGalleryView(
+                images: wallpaperViewModel.foundImages,
+                targetScreen: selectedScreenForGallery,
+                availableScreens: wallpaperViewModel.availableScreens,
+                useSameWallpaperOnAllMonitors: wallpaperViewModel.settings.multiMonitorSettings.useSameWallpaperOnAllMonitors,
+                onWallpaperSelected: { imageFile, screen in
+                    Task {
+                        if let screen = screen {
+                            await wallpaperViewModel.setWallpaperForScreen(imageFile, screen: screen)
+                        } else {
+                            await wallpaperViewModel.setWallpaperOnAllScreens(imageFile)
+                        }
+                    }
+                    showingWallpaperGallery = false
+                }
+            )
+        }
         .onReceive(settingsViewModel.$settings) { newSettings in
             wallpaperViewModel.updateSettings(newSettings)
         }
+        .onReceive(NotificationCenter.default.publisher(for: Notification.Name("TriggerWallpaperGallery"))) { _ in
+            // Open wallpaper gallery from menu bar
+            selectedScreenForGallery = nil
+            showingWallpaperGallery = true
+        }
         .task {
             await wallpaperViewModel.loadInitialData()
+        }
+        .onAppear {
+            // Set up the settings callback to ensure proper updates
+            settingsViewModel.onSettingsSaved = { newSettings in
+                wallpaperViewModel.updateSettings(newSettings)
+            }
         }
     }
 
@@ -274,6 +314,29 @@ struct ContentView: View {
         }
     }
 
+    private var placeholderView: some View {
+        VStack(spacing: 16) {
+            Image(systemName: "photo.on.rectangle.angled")
+                .font(.system(size: 64))
+                .foregroundColor(.secondary)
+
+            VStack(spacing: 8) {
+                Text("No Images Selected")
+                    .font(.title3)
+                    .fontWeight(.medium)
+
+                Text("Choose a folder with images to start cycling wallpapers")
+                    .font(.body)
+                    .foregroundColor(.secondary)
+                    .multilineTextAlignment(.center)
+
+                Button("Select Folder", action: selectFolder)
+                    .buttonStyle(.borderedProminent)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
     // MARK: - Actions
 
     private func toggleCycling() {
@@ -291,7 +354,8 @@ struct ContentView: View {
 
 // MARK: - Supporting Views
 
-struct CurrentImageView: View {
+/// Optimized image view with downscaled previews for better performance
+struct OptimizedImageView: View {
     let imageFile: ImageFile
     @State private var image: NSImage?
 
@@ -335,19 +399,169 @@ struct CurrentImageView: View {
             .cornerRadius(8)
         }
         .task {
-            await loadImage()
+            await loadOptimizedImage()
         }
     }
 
-    private func loadImage() async {
-        image = await withCheckedContinuation { continuation in
-            DispatchQueue.global(qos: .userInitiated).async {
-                let loadedImage = NSImage(contentsOf: imageFile.url)
-                DispatchQueue.main.async {
-                    continuation.resume(returning: loadedImage)
+    private func loadOptimizedImage() async {
+        // Use optimized loading from PerformanceMonitor
+        image = await PerformanceMonitor.loadOptimizedPreview(from: imageFile.url, maxSize: 400)
+    }
+}
+
+/// Multi-monitor preview showing current wallpapers for each screen
+struct MultiMonitorPreviewView: View {
+    let currentImages: [NSScreen: ImageFile]
+    let availableScreens: [(screen: NSScreen, displayName: String)]
+    let isInteractive: Bool
+    let onScreenTapped: ((NSScreen) -> Void)?
+    @State private var previewImages: [NSScreen: NSImage?] = [:]
+
+    var body: some View {
+        VStack(spacing: 16) {
+            Text("Multi-Monitor Wallpapers")
+                .font(.headline)
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+            if availableScreens.count <= 2 {
+                // Horizontal layout for 1-2 screens
+                HStack(spacing: 12) {
+                    ForEach(availableScreens, id: \.screen) { screenInfo in
+                        ScreenPreviewCard(
+                            screenInfo: screenInfo,
+                            currentImage: currentImages[screenInfo.screen],
+                            previewImage: previewImages[screenInfo.screen] ?? nil,
+                            isInteractive: isInteractive,
+                            onTapped: {
+                                onScreenTapped?(screenInfo.screen)
+                            }
+                        )
+                    }
+                }
+            } else {
+                // Grid layout for 3+ screens
+                LazyVGrid(columns: Array(repeating: GridItem(.flexible()), count: 2), spacing: 12) {
+                    ForEach(availableScreens, id: \.screen) { screenInfo in
+                        ScreenPreviewCard(
+                            screenInfo: screenInfo,
+                            currentImage: currentImages[screenInfo.screen],
+                            previewImage: previewImages[screenInfo.screen] ?? nil,
+                            isInteractive: isInteractive,
+                            onTapped: {
+                                onScreenTapped?(screenInfo.screen)
+                            }
+                        )
+                    }
                 }
             }
         }
+        .task {
+            await loadPreviewImages()
+        }
+        .onChange(of: currentImages) {
+            Task {
+                await loadPreviewImages()
+            }
+        }
+    }
+
+    private func loadPreviewImages() async {
+        let imageURLs = currentImages.compactMap { $0.value.url }
+        let loadedImages = await PerformanceMonitor.loadMultipleOptimizedPreviews(from: imageURLs, maxSize: 200)
+
+        await MainActor.run {
+            var newPreviewImages: [NSScreen: NSImage?] = [:]
+            for (screen, imageFile) in currentImages {
+                if let index = imageURLs.firstIndex(of: imageFile.url),
+                   index < loadedImages.count {
+                    newPreviewImages[screen] = loadedImages[index]
+                }
+            }
+            self.previewImages = newPreviewImages
+        }
+    }
+}
+
+/// Individual screen preview card
+struct ScreenPreviewCard: View {
+    let screenInfo: (screen: NSScreen, displayName: String)
+    let currentImage: ImageFile?
+    let previewImage: NSImage?
+    let isInteractive: Bool
+    let onTapped: (() -> Void)?
+
+    var body: some View {
+        VStack(spacing: 8) {
+            // Screen preview
+            Group {
+                if let nsImage = previewImage {
+                    Image(nsImage: nsImage)
+                        .resizable()
+                        .aspectRatio(contentMode: .fill)
+                        .frame(height: 120)
+                        .clipped()
+                        .cornerRadius(6)
+                } else if currentImage != nil {
+                    RoundedRectangle(cornerRadius: 6)
+                        .fill(Color(NSColor.controlBackgroundColor))
+                        .frame(height: 120)
+                        .overlay {
+                            ProgressView()
+                                .controlSize(.small)
+                        }
+                } else {
+                    RoundedRectangle(cornerRadius: 6)
+                        .fill(Color(NSColor.tertiarySystemFill))
+                        .frame(height: 120)
+                        .overlay {
+                            VStack(spacing: 4) {
+                                Image(systemName: "display")
+                                    .font(.title2)
+                                    .foregroundColor(.secondary)
+                                Text("No Image")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                            }
+                        }
+                }
+            }
+
+            // Screen info
+            VStack(spacing: 2) {
+                Text(screenInfo.displayName)
+                    .font(.caption)
+                    .fontWeight(.medium)
+                    .lineLimit(1)
+
+                if let imageName = currentImage?.name {
+                    Text(imageName)
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                } else {
+                    Text("No wallpaper")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                }
+            }
+        }
+        .frame(maxWidth: .infinity)
+        .padding(8)
+        .background(Color(NSColor.controlBackgroundColor))
+        .cornerRadius(8)
+        .overlay(
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(isInteractive ? Color.accentColor.opacity(0.5) : Color.clear, lineWidth: 1)
+        )
+        .scaleEffect(isInteractive ? 1.0 : 1.0)
+        .animation(.easeInOut(duration: 0.1), value: isInteractive)
+        .onTapGesture {
+            if isInteractive {
+                onTapped?()
+            }
+        }
+        .help(isInteractive ? "Click to change wallpaper for \(screenInfo.displayName)" : "")
     }
 }
 
@@ -404,6 +618,157 @@ struct InfoRow: View {
             Spacer()
             Text(value)
                 .foregroundColor(.secondary)
+        }
+    }
+}
+
+/// Wallpaper gallery for manual selection
+struct WallpaperGalleryView: View {
+    let images: [ImageFile]
+    let targetScreen: NSScreen?
+    let availableScreens: [(screen: NSScreen, displayName: String)]
+    let useSameWallpaperOnAllMonitors: Bool
+    let onWallpaperSelected: (ImageFile, NSScreen?) -> Void
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var selectedScreen: NSScreen?
+    @State private var searchText = ""
+    @State private var previewImages: [URL: NSImage] = [:]
+
+    private var filteredImages: [ImageFile] {
+        if searchText.isEmpty {
+            return images
+        } else {
+            return images.filter { $0.name.localizedCaseInsensitiveContains(searchText) }
+        }
+    }
+
+    var body: some View {
+        NavigationView {
+            VStack(spacing: 16) {
+                // Header
+                VStack(spacing: 12) {
+                    if useSameWallpaperOnAllMonitors {
+                        Text("Choose wallpaper for all screens")
+                            .font(.headline)
+                    } else {
+                        VStack(spacing: 8) {
+                            Text("Choose wallpaper for:")
+                                .font(.headline)
+
+                            Picker("Target Screen", selection: $selectedScreen) {
+                                Text("All Screens").tag(nil as NSScreen?)
+                                ForEach(availableScreens, id: \.screen) { screenInfo in
+                                    Text(screenInfo.displayName).tag(screenInfo.screen as NSScreen?)
+                                }
+                            }
+                            .pickerStyle(.menu)
+                        }
+                    }
+
+                    // Search
+                    HStack {
+                        Image(systemName: "magnifyingglass")
+                            .foregroundColor(.secondary)
+                        TextField("Search wallpapers...", text: $searchText)
+                            .textFieldStyle(.roundedBorder)
+                    }
+                }
+                .padding()
+
+                // Gallery Grid
+                ScrollView {
+                    LazyVGrid(columns: Array(repeating: GridItem(.flexible()), count: 4), spacing: 12) {
+                        ForEach(filteredImages, id: \.url) { imageFile in
+                            WallpaperThumbnail(
+                                imageFile: imageFile,
+                                previewImage: previewImages[imageFile.url],
+                                onTapped: {
+                                    let targetScreen = useSameWallpaperOnAllMonitors ? nil : (selectedScreen ?? targetScreen)
+                                    onWallpaperSelected(imageFile, targetScreen)
+                                }
+                            )
+                            .task {
+                                await loadThumbnail(for: imageFile)
+                            }
+                        }
+                    }
+                    .padding()
+                }
+            }
+            .navigationTitle("Wallpaper Gallery")
+            .toolbar {
+                ToolbarItem(placement: .navigation) {
+                    Button("Cancel") {
+                        dismiss()
+                    }
+                }
+            }
+        }
+        .frame(minWidth: 600, minHeight: 500)
+        .onAppear {
+            selectedScreen = targetScreen
+        }
+    }
+
+    private func loadThumbnail(for imageFile: ImageFile) async {
+        if previewImages[imageFile.url] == nil {
+            let thumbnail = await PerformanceMonitor.loadOptimizedPreview(from: imageFile.url, maxSize: 150)
+            await MainActor.run {
+                previewImages[imageFile.url] = thumbnail
+            }
+        }
+    }
+}
+
+/// Individual wallpaper thumbnail in the gallery
+struct WallpaperThumbnail: View {
+    let imageFile: ImageFile
+    let previewImage: NSImage?
+    let onTapped: () -> Void
+
+    @State private var isHovered = false
+
+    var body: some View {
+        VStack(spacing: 8) {
+            // Thumbnail
+            Group {
+                if let nsImage = previewImage {
+                    Image(nsImage: nsImage)
+                        .resizable()
+                        .aspectRatio(contentMode: .fill)
+                        .frame(width: 120, height: 80)
+                        .clipped()
+                        .cornerRadius(8)
+                } else {
+                    RoundedRectangle(cornerRadius: 8)
+                        .fill(Color(NSColor.controlBackgroundColor))
+                        .frame(width: 120, height: 80)
+                        .overlay {
+                            ProgressView()
+                                .controlSize(.small)
+                        }
+                }
+            }
+            .overlay(
+                RoundedRectangle(cornerRadius: 8)
+                    .stroke(Color.accentColor, lineWidth: isHovered ? 2 : 0)
+            )
+            .scaleEffect(isHovered ? 1.05 : 1.0)
+            .animation(.easeInOut(duration: 0.15), value: isHovered)
+
+            // Name
+            Text(imageFile.name)
+                .font(.caption)
+                .lineLimit(2)
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: 120)
+        }
+        .onHover { hovering in
+            isHovered = hovering
+        }
+        .onTapGesture {
+            onTapped()
         }
     }
 }

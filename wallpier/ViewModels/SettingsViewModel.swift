@@ -255,8 +255,19 @@ private extension SettingsViewModel {
             return
         }
 
-        // Update settings
+        // Update settings - even if it's the same folder, we want to trigger updates
+        let oldPath = settings.folderPath
         settings.folderPath = url
+
+        // Force trigger settings update even if the path is the same
+        if oldPath == url {
+            // Manually trigger the onSettingsSaved callback to ensure UI updates
+            onSettingsSaved?(settings)
+        }
+
+        // Save settings immediately
+        settings.save()
+
         statusMessage = "Folder selected: \(url.lastPathComponent)"
 
         // Clear status message after delay

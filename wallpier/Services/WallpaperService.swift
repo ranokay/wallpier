@@ -39,7 +39,10 @@ enum WallpaperError: LocalizedError {
 /// Protocol for wallpaper service operations
 protocol WallpaperServiceProtocol {
     func setWallpaper(_ imageURL: URL) async throws
+    func setWallpaper(_ imageURL: URL, multiMonitorSettings: MultiMonitorSettings) async throws
+    func setWallpaperForMultipleMonitors(_ imageURLs: [URL], multiMonitorSettings: MultiMonitorSettings) async throws
     func getCurrentWallpaper() async -> URL?
+    func getCurrentWallpapers() async -> [NSScreen: URL]
     func getSupportedImageTypes() async -> [String]
     func setWallpaperForScreen(_ imageURL: URL, screen: NSScreen?) async throws
 }
@@ -53,9 +56,19 @@ protocol WallpaperServiceProtocol {
     /// Supported image file extensions
     private let supportedImageTypes = ["jpg", "jpeg", "png", "heic", "bmp", "tiff", "gif"]
 
-    /// Sets wallpaper for all screens
+    /// Current wallpapers per screen for multi-monitor support
+    private var currentWallpapers: [NSScreen: URL] = [:]
+
+    /// Sets wallpaper for all screens (legacy method)
     func setWallpaper(_ imageURL: URL) async throws {
-        logger.info("Setting wallpaper: \(imageURL.path)")
+        // Default to using same wallpaper on all monitors
+        let defaultSettings = MultiMonitorSettings()
+        try await setWallpaper(imageURL, multiMonitorSettings: defaultSettings)
+    }
+
+    /// Sets wallpaper with multi-monitor support
+    func setWallpaper(_ imageURL: URL, multiMonitorSettings: MultiMonitorSettings) async throws {
+        logger.info("Setting wallpaper with multi-monitor settings: \(imageURL.path)")
 
         // Validate file exists
         guard FileManager.default.fileExists(atPath: imageURL.path) else {
@@ -69,14 +82,63 @@ protocol WallpaperServiceProtocol {
             throw WallpaperError.unsupportedImageType
         }
 
-        // Set wallpaper for all screens
         let screens = NSScreen.screens
 
-        for screen in screens {
-            try await setWallpaperForScreen(imageURL, screen: screen)
+        if multiMonitorSettings.useSameWallpaperOnAllMonitors {
+            // Set same wallpaper on all screens
+            for screen in screens {
+                try await setWallpaperForScreen(imageURL, screen: screen)
+                currentWallpapers[screen] = imageURL
+            }
+        } else {
+            // For the first screen, use the provided image
+            if let mainScreen = screens.first {
+                try await setWallpaperForScreen(imageURL, screen: mainScreen)
+                currentWallpapers[mainScreen] = imageURL
+            }
+            // Other screens keep their current wallpapers or use default if not set
         }
 
         logger.info("Successfully set wallpaper for \(screens.count) screen(s)")
+    }
+
+    /// Sets different wallpapers for multiple monitors
+    func setWallpaperForMultipleMonitors(_ imageURLs: [URL], multiMonitorSettings: MultiMonitorSettings) async throws {
+        logger.info("Setting multiple wallpapers for monitors: \(imageURLs.count) images")
+
+        let screens = NSScreen.screens
+
+        // Validate all files exist
+        for imageURL in imageURLs {
+            guard FileManager.default.fileExists(atPath: imageURL.path) else {
+                logger.error("File not found: \(imageURL.path)")
+                throw WallpaperError.fileNotFound
+            }
+
+            guard isValidImageType(imageURL) else {
+                logger.error("Unsupported image type: \(imageURL.pathExtension)")
+                throw WallpaperError.unsupportedImageType
+            }
+        }
+
+        if multiMonitorSettings.useSameWallpaperOnAllMonitors && !imageURLs.isEmpty {
+            // Use first image for all screens
+            let imageURL = imageURLs[0]
+            for screen in screens {
+                try await setWallpaperForScreen(imageURL, screen: screen)
+                currentWallpapers[screen] = imageURL
+            }
+        } else {
+            // Set different wallpapers per screen
+            for (index, screen) in screens.enumerated() {
+                let imageIndex = index % imageURLs.count // Cycle through images if more screens than images
+                let imageURL = imageURLs[imageIndex]
+                try await setWallpaperForScreen(imageURL, screen: screen)
+                currentWallpapers[screen] = imageURL
+            }
+        }
+
+        logger.info("Successfully set wallpapers for \(screens.count) screen(s)")
     }
 
     /// Sets wallpaper for a specific screen
@@ -114,6 +176,21 @@ protocol WallpaperServiceProtocol {
         }
     }
 
+    /// Gets current wallpapers for all screens
+    func getCurrentWallpapers() async -> [NSScreen: URL] {
+        return await withCheckedContinuation { continuation in
+            DispatchQueue.main.async {
+                var wallpapers: [NSScreen: URL] = [:]
+                for screen in NSScreen.screens {
+                    if let url = self.workspace.desktopImageURL(for: screen) {
+                        wallpapers[screen] = url
+                    }
+                }
+                continuation.resume(returning: wallpapers)
+            }
+        }
+    }
+
     /// Returns the list of supported image file extensions
     func getSupportedImageTypes() async -> [String] {
         return supportedImageTypes
@@ -123,6 +200,14 @@ protocol WallpaperServiceProtocol {
     private func isValidImageType(_ url: URL) -> Bool {
         let fileExtension = url.pathExtension.lowercased()
         return supportedImageTypes.contains(fileExtension)
+    }
+
+    /// Gets available screens info for multi-monitor setup
+    func getScreensInfo() -> [(screen: NSScreen, displayName: String)] {
+        return NSScreen.screens.enumerated().map { index, screen in
+            let displayName = screen.localizedName.isEmpty ? "Display \(index + 1)" : screen.localizedName
+            return (screen: screen, displayName: displayName)
+        }
     }
 }
 

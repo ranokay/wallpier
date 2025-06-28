@@ -185,15 +185,11 @@ struct MultiMonitorSettings: Codable {
     /// Whether to use the same wallpaper on all monitors
     var useSameWallpaperOnAllMonitors: Bool
 
-    /// Whether to cycle wallpapers synchronously across monitors
-    var synchronizeCycling: Bool
-
     /// Per-monitor scaling modes (key is monitor identifier)
     var perMonitorScaling: [String: WallpaperScalingMode]
 
     init() {
         self.useSameWallpaperOnAllMonitors = true
-        self.synchronizeCycling = true
         self.perMonitorScaling = [:]
     }
 }
