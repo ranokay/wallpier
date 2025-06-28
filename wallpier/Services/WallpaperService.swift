@@ -41,7 +41,9 @@ enum WallpaperError: LocalizedError {
 }
 
 /// Protocol for wallpaper service operations
-@preconcurrency protocol WallpaperServiceProtocol: Sendable {
+@preconcurrency
+@MainActor
+protocol WallpaperServiceProtocol: Sendable {
     func setWallpaper(_ imageURL: URL) async throws
     func setWallpaper(_ imageURL: URL, multiMonitorSettings: MultiMonitorSettings) async throws
     func setWallpaperForMultipleMonitors(_ imageURLs: [URL], multiMonitorSettings: MultiMonitorSettings) async throws
@@ -60,9 +62,6 @@ enum WallpaperError: LocalizedError {
 
     /// Supported image file extensions
     private let supportedImageTypes = ["jpg", "jpeg", "png", "heic", "bmp", "tiff", "gif"]
-
-    /// Current wallpapers per screen for multi-monitor support
-    private var currentWallpapers: [NSScreen: URL] = [:]
 
     private let wallpaperDidChangePublisher = PassthroughSubject<URL?, Never>()
 
@@ -109,13 +108,11 @@ enum WallpaperError: LocalizedError {
             // Set same wallpaper on all screens
             for screen in screens {
                 try await setWallpaperForScreen(imageURL, screen: screen)
-                currentWallpapers[screen] = imageURL
             }
         } else {
             // For the first screen, use the provided image
             if let mainScreen = screens.first {
                 try await setWallpaperForScreen(imageURL, screen: mainScreen)
-                currentWallpapers[mainScreen] = imageURL
             }
             // Other screens keep their current wallpapers or use default if not set
         }
@@ -143,19 +140,31 @@ enum WallpaperError: LocalizedError {
         }
 
         if multiMonitorSettings.useSameWallpaperOnAllMonitors && !imageURLs.isEmpty {
-            // Use first image for all screens
+            // Use first image for all screens with per-monitor scaling
             let imageURL = imageURLs[0]
-            for screen in screens {
-                try await setWallpaperForScreen(imageURL, screen: screen)
-                currentWallpapers[screen] = imageURL
+            for (index, screen) in screens.enumerated() {
+                let displayName = screen.localizedName.isEmpty ? "Display \(index + 1)" : screen.localizedName
+                let scalingMode = multiMonitorSettings.perMonitorScaling[displayName] ?? .fill
+                let options: [NSWorkspace.DesktopImageOptionKey: Any] = [
+                    .allowClipping: true,
+                    .imageScaling: scalingMode.nsImageScaling.rawValue
+                ]
+                try workspace.setDesktopImageURL(imageURL, for: screen, options: options)
+                wallpaperDidChangePublisher.send(imageURL)
             }
         } else {
-            // Set different wallpapers per screen
+            // Set different wallpapers per screen with per-monitor scaling
             for (index, screen) in screens.enumerated() {
                 let imageIndex = index % imageURLs.count // Cycle through images if more screens than images
                 let imageURL = imageURLs[imageIndex]
-                try await setWallpaperForScreen(imageURL, screen: screen)
-                currentWallpapers[screen] = imageURL
+                let displayName = screen.localizedName.isEmpty ? "Display \(index + 1)" : screen.localizedName
+                let scalingMode = multiMonitorSettings.perMonitorScaling[displayName] ?? .fill
+                let options: [NSWorkspace.DesktopImageOptionKey: Any] = [
+                    .allowClipping: true,
+                    .imageScaling: scalingMode.nsImageScaling.rawValue
+                ]
+                try workspace.setDesktopImageURL(imageURL, for: screen, options: options)
+                wallpaperDidChangePublisher.send(imageURL)
             }
         }
 

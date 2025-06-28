@@ -43,7 +43,7 @@ final class SettingsViewModel: ObservableObject {
 
     // MARK: - Internal State
 
-    private let originalSettings: WallpaperSettings
+    private var originalSettings: WallpaperSettings
     private var cancellables = Set<AnyCancellable>()
 
     // MARK: - Callbacks
@@ -62,6 +62,29 @@ final class SettingsViewModel: ObservableObject {
 
         setupBindings()
         validateSettings()
+
+        // Restore security-scoped access if bookmark exists
+        if let bookmark = settings.folderBookmark {
+            var isStale = false
+            do {
+                let url = try URL(resolvingBookmarkData: bookmark,
+                                   options: [.withSecurityScope, .withoutUI],
+                                   relativeTo: nil,
+                                   bookmarkDataIsStale: &isStale)
+                if isStale {
+                    logger.warning("Bookmark data is stale for folder: \(url.path)")
+                }
+                if url.startAccessingSecurityScopedResource() {
+                    self.settings.folderPath = url
+                    self.originalSettings.folderPath = url
+                    logger.info("Accessing persisted folder: \(url.path)")
+                } else {
+                    logger.warning("Failed to access security-scoped resource for folder: \(url.path)")
+                }
+            } catch {
+                logger.error("Failed to resolve bookmark for folder: \(error.localizedDescription)")
+            }
+        }
 
         logger.info("SettingsViewModel initialized")
     }
@@ -122,6 +145,8 @@ final class SettingsViewModel: ObservableObject {
         onSettingsSaved?(settings)
 
         hasUnsavedChanges = false
+        // Update baseline so cancel no longer reverts saved changes
+        originalSettings = settings
         isSaving = false
 
         logger.info("Settings saved successfully")
@@ -132,6 +157,8 @@ final class SettingsViewModel: ObservableObject {
 
     /// Discards changes and reverts to original settings
     func cancelChanges() {
+        // Only cancel if there are unsaved changes
+        guard hasUnsavedChanges else { return }
         logger.info("Cancelling settings changes")
 
         settings = originalSettings
@@ -268,8 +295,16 @@ private extension SettingsViewModel {
             return
         }
 
-        // Update settings
+        // Update settings and create persistent bookmark
         settings.folderPath = url
+        do {
+            let bookmark = try url.bookmarkData(options: [.withSecurityScope], includingResourceValuesForKeys: nil, relativeTo: nil)
+            settings.folderBookmark = bookmark
+            originalSettings.folderBookmark = bookmark
+            logger.info("Created security-scoped bookmark for folder")
+        } catch {
+            logger.error("Failed to create bookmark for folder: \(error.localizedDescription)")
+        }
 
         // Mark as having unsaved changes
         hasUnsavedChanges = true
@@ -348,6 +383,24 @@ extension SettingsViewModel {
         return settings.advancedSettings.enableDetailedLogging ||
                settings.advancedSettings.maxCacheSizeMB > 200 ||
                !settings.advancedSettings.pauseInLowPowerMode
+    }
+
+    /// Available display names for multi-monitor scaling configuration
+    var availableDisplayNames: [String] {
+        NSScreen.screens.enumerated().map { index, screen in
+            let name = screen.localizedName.isEmpty ? "Display \(index + 1)" : screen.localizedName
+            return name
+        }
+    }
+
+    /// Get per-monitor scaling mode for a specific display
+    func perMonitorScalingMode(for displayName: String) -> WallpaperScalingMode {
+        settings.multiMonitorSettings.perMonitorScaling[displayName] ?? settings.scalingMode
+    }
+
+    /// Set per-monitor scaling mode for a specific display
+    func setPerMonitorScalingMode(_ mode: WallpaperScalingMode, for displayName: String) {
+        settings.multiMonitorSettings.perMonitorScaling[displayName] = mode
     }
 }
 

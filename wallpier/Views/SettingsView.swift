@@ -94,13 +94,14 @@ struct SettingsView: View {
                         .controlSize(.large)
                         .disabled(viewModel.isSaving || !viewModel.hasUnsavedChanges || !viewModel.validationErrors.isEmpty)
 
-                        Button("Cancel") {
+                        Button("Close") {
                             viewModel.cancelChanges()
                             dismiss()
                         }
                         .buttonStyle(.bordered)
                         .controlSize(.large)
                         .disabled(viewModel.isSaving)
+                        .keyboardShortcut(.cancelAction)
                     }
                     .padding(.horizontal, 16)
                     .padding(.vertical, 16)
@@ -461,6 +462,30 @@ struct DisplaySettingsView: View {
                     .padding(.horizontal, 12)
                     .background(Color.accentColor.opacity(0.1))
                     .cornerRadius(6)
+
+                    // Per-monitor scaling options
+                    if !viewModel.settings.multiMonitorSettings.useSameWallpaperOnAllMonitors {
+                        VStack(alignment: .leading, spacing: 12) {
+                            ForEach(viewModel.availableDisplayNames, id: \.self) { displayName in
+                                HStack {
+                                    Text(displayName)
+                                        .font(.caption)
+                                    Spacer()
+                                    Picker("", selection: Binding(
+                                        get: { viewModel.perMonitorScalingMode(for: displayName) },
+                                        set: { viewModel.setPerMonitorScalingMode($0, for: displayName) }
+                                    )) {
+                                        ForEach(WallpaperScalingMode.allCases, id: \.self) { mode in
+                                            Text(mode.displayName).tag(mode)
+                                        }
+                                    }
+                                    .pickerStyle(.menu)
+                                    .frame(width: 150)
+                                }
+                            }
+                        }
+                        .padding(.vertical, 8)
+                    }
                 }
             }
 

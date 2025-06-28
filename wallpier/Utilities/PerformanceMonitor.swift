@@ -8,6 +8,10 @@
 import Foundation
 import OSLog
 import AppKit
+import Darwin
+
+// Allow NSImage to be used as Sendable in async contexts
+extension NSImage: @unchecked @retroactive Sendable {}
 
 /// Performance monitoring utility for tracking app metrics
 final class PerformanceMonitor: ObservableObject {
@@ -37,6 +41,8 @@ final class PerformanceMonitor: ObservableObject {
     private var wallpaperChangeTimes: [TimeInterval] = []
     private var monitoringTimer: Timer?
     private var isMonitoring = false
+    private var previousCPUInfo = host_cpu_load_info()
+    private var previousCPUInfoValid = false
 
     private init() {
         startMonitoring()
@@ -180,11 +186,32 @@ final class PerformanceMonitor: ObservableObject {
         }
     }
 
-    /// Updates CPU usage metric (simplified)
+    /// Updates CPU usage metric using host_statistics
     private func updateCPUUsage() {
-        // CPU usage monitoring is complex on macOS, so we'll use a simplified approach
-        // In a production app, you'd use more sophisticated CPU monitoring
-        cpuUsage = 0.0 // Placeholder - would implement proper CPU monitoring
+        var count = mach_msg_type_number_t(MemoryLayout<host_cpu_load_info_data_t>.size / MemoryLayout<integer_t>.size)
+        var cpuInfo = host_cpu_load_info()
+        let result: kern_return_t = withUnsafeMutablePointer(to: &cpuInfo) {
+            $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) { intPointer in
+                host_statistics(mach_host_self(), HOST_CPU_LOAD_INFO, intPointer, &count)
+            }
+        }
+        guard result == KERN_SUCCESS else {
+            cpuUsage = 0.0
+            return
+        }
+
+        if previousCPUInfoValid {
+            let userDiff = Double(cpuInfo.cpu_ticks.0 - previousCPUInfo.cpu_ticks.0)
+            let systemDiff = Double(cpuInfo.cpu_ticks.1 - previousCPUInfo.cpu_ticks.1)
+            let idleDiff = Double(cpuInfo.cpu_ticks.2 - previousCPUInfo.cpu_ticks.2)
+            let niceDiff = Double(cpuInfo.cpu_ticks.3 - previousCPUInfo.cpu_ticks.3)
+            let totalTicks = userDiff + systemDiff + idleDiff + niceDiff
+            let busyTicks = userDiff + systemDiff + niceDiff
+            cpuUsage = totalTicks > 0 ? (busyTicks / totalTicks) * 100.0 : 0.0
+        }
+
+        previousCPUInfo = cpuInfo
+        previousCPUInfoValid = true
     }
 
     /// Checks if all performance targets are met
@@ -333,6 +360,7 @@ extension PerformanceMonitor {
     static let maxPreviewSize: CGFloat = 400
 
     /// Loads an optimized preview image with size constraints
+    @MainActor
     static func loadOptimizedPreview(from url: URL, maxSize: CGFloat = maxPreviewSize) async -> NSImage? {
         return await withCheckedContinuation { continuation in
             DispatchQueue.global(qos: .userInitiated).async {
@@ -381,6 +409,7 @@ extension PerformanceMonitor {
     }
 
     /// Loads multiple preview images for multi-monitor setup
+    @MainActor
     static func loadMultipleOptimizedPreviews(from urls: [URL], maxSize: CGFloat = maxPreviewSize) async -> [NSImage?] {
         await withTaskGroup(of: (Int, NSImage?).self) { group in
             // Add tasks for each URL

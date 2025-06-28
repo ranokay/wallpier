@@ -80,6 +80,9 @@ struct WallpaperSettings: Codable {
     /// Selected folder path for wallpaper images
     var folderPath: URL?
 
+    /// Bookmark data for persistent security-scoped access to wallpaper folder
+    var folderBookmark: Data?
+
     /// Whether to scan subfolders recursively
     var isRecursiveScanEnabled: Bool
 
@@ -122,6 +125,7 @@ struct WallpaperSettings: Codable {
     init() {
         self.version = Self.currentVersion
         self.folderPath = nil
+        self.folderBookmark = nil
         self.isRecursiveScanEnabled = true
         self.cyclingInterval = 300 // 5 minutes
         self.isCyclingEnabled = false

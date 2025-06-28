@@ -11,7 +11,9 @@ import OSLog
 import Combine
 
 /// Protocol for image caching operations
-@preconcurrency protocol ImageCacheServiceProtocol: Sendable {
+@preconcurrency
+@MainActor
+protocol ImageCacheServiceProtocol: Sendable {
     func cacheImage(_ image: NSImage, for url: URL) async
     func getCachedImage(for url: URL) async -> NSImage?
     func preloadImage(from url: URL) async -> NSImage?
@@ -265,16 +267,24 @@ import Combine
                     return
                 }
 
-                // Load image with size optimization
-                Task { @MainActor in
-                    guard let image = self.loadImageOptimized(from: url) else {
-                        self.logger.debug("Failed to preload: \(url.lastPathComponent)")
+                // Load image with size optimization on main actor
+                Task {
+                    let image = await MainActor.run {
+                        return self.loadImageOptimized(from: url)
+                    }
+
+                    guard let image = image else {
+                        await MainActor.run {
+                            self.logger.debug("Failed to preload: \(url.lastPathComponent)")
+                        }
                         continuation.resume(returning: nil)
                         return
                     }
 
-                    // Cache the image
-                    self.cacheImage(image, for: url)
+                    // Cache the image on main actor
+                    await MainActor.run {
+                        self.cacheImage(image, for: url)
+                    }
                     continuation.resume(returning: image)
                 }
             }
@@ -493,7 +503,7 @@ import Combine
         var currentSize = getActualCacheSize()
         var evictedCount = 0
 
-        for (key, score) in scoredEntries {
+        for (key, _) in scoredEntries {
             if currentSize > targetSize && evictedCount < 10 { // Limit evictions per cycle
                 removeCachedImage(for: URL(string: key as String)!)
                 currentSize = getActualCacheSize()
