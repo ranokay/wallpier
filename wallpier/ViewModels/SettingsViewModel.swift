@@ -46,6 +46,9 @@ final class SettingsViewModel: ObservableObject {
     private var originalSettings: WallpaperSettings
     private var cancellables = Set<AnyCancellable>()
 
+    /// Currently accessed security-scoped URL that needs to be released
+    nonisolated(unsafe) private var currentSecurityScopedURL: URL?
+
     // MARK: - Callbacks
 
     /// Callback for when settings are saved
@@ -74,12 +77,10 @@ final class SettingsViewModel: ObservableObject {
                 if isStale {
                     logger.warning("Bookmark data is stale for folder: \(url.path)")
                 }
-                if url.startAccessingSecurityScopedResource() {
+                if startAccessingSecurityScopedResource(for: url) {
                     self.settings.folderPath = url
                     self.originalSettings.folderPath = url
                     logger.info("Accessing persisted folder: \(url.path)")
-                } else {
-                    logger.warning("Failed to access security-scoped resource for folder: \(url.path)")
                 }
             } catch {
                 logger.error("Failed to resolve bookmark for folder: \(error.localizedDescription)")
@@ -87,6 +88,38 @@ final class SettingsViewModel: ObservableObject {
         }
 
         logger.info("SettingsViewModel initialized")
+    }
+
+    deinit {
+        stopAccessingCurrentSecurityScopedResource()
+        logger.info("SettingsViewModel deinitialized")
+    }
+
+    // MARK: - Security-Scoped Resource Management
+
+    /// Stops accessing the current security-scoped resource if one exists
+    nonisolated private func stopAccessingCurrentSecurityScopedResource() {
+        if let currentURL = currentSecurityScopedURL {
+            currentURL.stopAccessingSecurityScopedResource()
+            logger.info("Stopped accessing security-scoped resource: \(currentURL.path)")
+            currentSecurityScopedURL = nil
+        }
+    }
+
+    /// Starts accessing a security-scoped resource, stopping any previous one
+    private func startAccessingSecurityScopedResource(for url: URL) -> Bool {
+        // Stop accessing any current resource first
+        stopAccessingCurrentSecurityScopedResource()
+
+        // Start accessing the new resource
+        if url.startAccessingSecurityScopedResource() {
+            currentSecurityScopedURL = url
+            logger.info("Started accessing security-scoped resource: \(url.path)")
+            return true
+        } else {
+            logger.warning("Failed to access security-scoped resource: \(url.path)")
+            return false
+        }
     }
 
     // MARK: - Public Interface
@@ -295,6 +328,13 @@ private extension SettingsViewModel {
             return
         }
 
+        // Start accessing the new security-scoped resource (this will stop accessing the current one)
+        guard startAccessingSecurityScopedResource(for: url) else {
+            logger.error("Failed to access security-scoped resource for selected folder")
+            showToast(message: "Unable to access selected folder")
+            return
+        }
+
         // Update settings and create persistent bookmark
         settings.folderPath = url
         do {
@@ -304,6 +344,7 @@ private extension SettingsViewModel {
             logger.info("Created security-scoped bookmark for folder")
         } catch {
             logger.error("Failed to create bookmark for folder: \(error.localizedDescription)")
+            // Don't return here - the folder selection can still work without the bookmark
         }
 
         // Mark as having unsaved changes

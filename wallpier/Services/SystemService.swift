@@ -113,10 +113,68 @@ class SystemService: NSObject, SystemServiceProtocol, ObservableObject {
     }
 
     func checkPermissionStatus() -> PermissionStatus {
-        // In a sandboxed environment, we assume permissions are granted by folder selection
-        logger.debug("Permission status: granted by default")
-        self.permissionStatus = .granted
-        return .granted
+        logger.debug("Checking actual permission status")
+
+        // Get current wallpaper settings to check for existing bookmarks
+        let settings = WallpaperSettings.load()
+
+        // Check if we have any security-scoped bookmarks
+        guard let bookmarkData = settings.folderBookmark else {
+            logger.debug("No security-scoped bookmarks found - permissions not determined")
+            self.permissionStatus = .notDetermined
+            return .notDetermined
+        }
+
+        // Try to resolve the security-scoped bookmark
+        do {
+            var isStale = false
+            let url = try URL(resolvingBookmarkData: bookmarkData,
+                             options: [.withSecurityScope, .withoutUI],
+                             relativeTo: nil,
+                             bookmarkDataIsStale: &isStale)
+
+            if isStale {
+                logger.warning("Security-scoped bookmark is stale for: \(url.path)")
+                self.permissionStatus = .denied
+                return .denied
+            }
+
+            // Test if we can actually access the folder
+            if url.startAccessingSecurityScopedResource() {
+                defer {
+                    url.stopAccessingSecurityScopedResource()
+                }
+
+                // Test folder access by checking if we can enumerate contents
+                let isAccessible = FileManager.default.fileExists(atPath: url.path)
+                if isAccessible {
+                    // Try to read the folder contents as an additional verification
+                    let canReadContents = (try? FileManager.default.contentsOfDirectory(atPath: url.path)) != nil
+                    if canReadContents {
+                        logger.debug("Successfully verified folder access permissions")
+                        self.permissionStatus = .granted
+                        return .granted
+                    } else {
+                        logger.warning("Folder exists but cannot read contents - permission denied")
+                        self.permissionStatus = .denied
+                        return .denied
+                    }
+                } else {
+                    logger.warning("Cannot access folder - path may not exist: \(url.path)")
+                    self.permissionStatus = .denied
+                    return .denied
+                }
+            } else {
+                logger.warning("Failed to start accessing security-scoped resource: \(url.path)")
+                self.permissionStatus = .denied
+                return .denied
+            }
+
+        } catch {
+            logger.error("Failed to resolve security-scoped bookmark: \(error.localizedDescription)")
+            self.permissionStatus = .denied
+            return .denied
+        }
     }
 
     // MARK: - Launch at Startup
