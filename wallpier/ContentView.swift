@@ -8,7 +8,7 @@
 import SwiftUI
 
 struct ContentView: View {
-    @StateObject private var wallpaperViewModel = WallpaperViewModel()
+    @EnvironmentObject var wallpaperViewModel: WallpaperViewModel
     @StateObject private var settingsViewModel: SettingsViewModel
     @State private var showingSettings = false
     @State private var showingAbout = false
@@ -52,34 +52,34 @@ struct ContentView: View {
                         .font(.headline)
                         .foregroundColor(.primary)
 
-                    VStack(spacing: 8) {
+                    // Manual Navigation
+                    HStack(spacing: 5) {
+                        Button(action: { wallpaperViewModel.goToPreviousImage() }) {
+                            Image(systemName: "backward.fill")
+                        }
+                        .disabled(!wallpaperViewModel.canGoBack)
+
+                        Spacer()
+
                         // Start/Stop Button
                         Button(action: toggleCycling) {
                             HStack {
                                 Image(systemName: wallpaperViewModel.isRunning ? "stop.circle.fill" : "play.circle.fill")
-                                Text(wallpaperViewModel.isRunning ? "Stop Cycling" : "Start Cycling")
+                                Text(wallpaperViewModel.isRunning ? "Stop" : "Start")
                             }
-                            .frame(maxWidth: .infinity)
+                            .frame(minWidth: 80)
                         }
-                        .buttonStyle(.borderedProminent)
+                        .buttonStyle(ControlButton(isProminent: !wallpaperViewModel.isRunning))
                         .disabled(wallpaperViewModel.isRunning ? false : !wallpaperViewModel.canStartCycling)
 
-                        // Manual Navigation
-                        HStack {
-                            Button(action: { wallpaperViewModel.goToPreviousImage() }) {
-                                Image(systemName: "backward.fill")
-                            }
-                            .disabled(!wallpaperViewModel.canGoBack)
+                        Spacer()
 
-                            Spacer()
-
-                            Button(action: { wallpaperViewModel.goToNextImage() }) {
-                                Image(systemName: "forward.fill")
-                            }
-                            .disabled(!wallpaperViewModel.canAdvance)
+                        Button(action: { wallpaperViewModel.goToNextImage() }) {
+                            Image(systemName: "forward.fill")
                         }
-                        .buttonStyle(.bordered)
+                        .disabled(!wallpaperViewModel.canAdvance)
                     }
+                    .buttonStyle(ControlButton(isProminent: false))
                 }
                 .padding(.horizontal)
 
@@ -110,7 +110,7 @@ struct ContentView: View {
                                         .foregroundColor(.secondary)
                                 }
                             }
-                            .buttonStyle(.bordered)
+                            .buttonStyle(ControlButton(isProminent: false))
                         }
 
                         // Interval Picker
@@ -139,7 +139,7 @@ struct ContentView: View {
                 // Settings Button
                 VStack(spacing: 8) {
                     Button("Settings", action: { showingSettings = true })
-                        .buttonStyle(.bordered)
+                        .buttonStyle(ControlButton(isProminent: false))
 
                     Button("About", action: { showingAbout = true })
                         .buttonStyle(.borderless)
@@ -195,7 +195,7 @@ struct ContentView: View {
                     } else {
                         placeholderView
                     }
-                                } else if !wallpaperViewModel.currentImages.isEmpty {
+                } else if !wallpaperViewModel.currentImages.isEmpty {
                     // Multi-monitor preview
                     MultiMonitorPreviewView(
                         currentImages: wallpaperViewModel.currentImages,
@@ -225,14 +225,14 @@ struct ContentView: View {
 
                         HStack(spacing: 8) {
                             Button("Rescan", action: { wallpaperViewModel.rescanCurrentFolder() })
-                                .buttonStyle(.bordered)
+                                .buttonStyle(ControlButton(isProminent: false))
                                 .disabled(wallpaperViewModel.isScanning)
 
                             Button("Browse Wallpapers") {
                                 selectedScreenForGallery = nil
                                 showingWallpaperGallery = true
                             }
-                            .buttonStyle(.bordered)
+                            .buttonStyle(ControlButton(isProminent: false))
                             .disabled(wallpaperViewModel.foundImages.isEmpty)
                         }
                     }
@@ -331,7 +331,7 @@ struct ContentView: View {
                     .multilineTextAlignment(.center)
 
                 Button("Select Folder", action: selectFolder)
-                    .buttonStyle(.borderedProminent)
+                    .buttonStyle(ControlButton(isProminent: true))
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -349,6 +349,23 @@ struct ContentView: View {
 
     private func selectFolder() {
         settingsViewModel.selectFolder()
+    }
+}
+
+// MARK: - Custom Styles
+
+struct ControlButton: ButtonStyle {
+    let isProminent: Bool
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .padding(.horizontal, 12)
+            .padding(.vertical, 6)
+            .background(isProminent ? Color.accentColor : Color.secondary.opacity(0.2))
+            .foregroundColor(isProminent ? .white : .primary)
+            .cornerRadius(6)
+            .scaleEffect(configuration.isPressed ? 0.95 : 1.0)
+            .animation(.easeInOut(duration: 0.1), value: configuration.isPressed)
     }
 }
 
@@ -634,6 +651,7 @@ struct WallpaperGalleryView: View {
     @State private var selectedScreen: NSScreen?
     @State private var searchText = ""
     @State private var previewImages: [URL: NSImage] = [:]
+    private let imageLoader = ImageLoader()
 
     private var filteredImages: [ImageFile] {
         if searchText.isEmpty {
@@ -708,6 +726,17 @@ struct WallpaperGalleryView: View {
         .frame(minWidth: 600, minHeight: 500)
         .onAppear {
             selectedScreen = targetScreen
+            Task {
+                let imageURLs = images.map { $0.url }
+                let loadedImages = await imageLoader.loadMultiple(from: imageURLs, maxSize: 200)
+                var newPreviewImages: [URL: NSImage] = [:]
+                for (index, image) in loadedImages.enumerated() {
+                    if let image = image {
+                        newPreviewImages[imageURLs[index]] = image
+                    }
+                }
+                self.previewImages = newPreviewImages
+            }
         }
     }
 
@@ -773,6 +802,20 @@ struct WallpaperThumbnail: View {
     }
 }
 
+// MARK: - Image Loading Actor
+
+actor ImageLoader {
+    func load(from url: URL, maxSize: CGFloat) async -> NSImage? {
+        return await PerformanceMonitor.loadOptimizedPreview(from: url, maxSize: maxSize)
+    }
+
+    func loadMultiple(from urls: [URL], maxSize: CGFloat) async -> [NSImage?] {
+        return await PerformanceMonitor.loadMultipleOptimizedPreviews(from: urls, maxSize: maxSize)
+    }
+}
+
 #Preview {
     ContentView()
+        .environmentObject(WallpaperViewModel())
+        .environmentObject(SettingsViewModel(settings: WallpaperSettings()))
 }

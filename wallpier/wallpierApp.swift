@@ -7,6 +7,16 @@
 
 import SwiftUI
 import AppKit
+import Combine
+
+// MARK: - Notification Names
+extension Notification.Name {
+    static let openMainWindow = Notification.Name("com.oxystack.wallpier.openMainWindow")
+    static let openSettings = Notification.Name("com.oxystack.wallpier.openSettings")
+    static let openWallpaperGallery = Notification.Name("com.oxystack.wallpier.openWallpaperGallery")
+    static let selectFolder = Notification.Name("com.oxystack.wallpier.selectFolder")
+    static let appWillTerminate = Notification.Name("com.oxystack.wallpier.appWillTerminate")
+}
 
 @main
 struct wallpierApp: App {
@@ -114,24 +124,15 @@ struct wallpierApp: App {
         .windowResizability(.contentSize)
         .defaultPosition(.center)
 
-        // Menu Bar Extra (Status Item) - Enhanced version
-        WindowGroup(id: "status-menu") {
-            StatusMenuView(
-                wallpaperViewModel: wallpaperViewModel,
-                settingsViewModel: settingsViewModel
-            )
-        }
-        .windowStyle(.hiddenTitleBar)
-        .windowResizability(.contentSize)
-        .defaultSize(width: 0, height: 0)
-
-        // Alternative SwiftUI Menu Bar (backup)
+        // Menu Bar Extra with fixes for state and layout
         MenuBarExtra("Wallpier", systemImage: "photo.on.rectangle.angled") {
+            // Use an ID to force the menu to update when state changes
             StatusMenuContent(
                 wallpaperViewModel: wallpaperViewModel,
                 settingsViewModel: settingsViewModel,
                 systemService: systemService
             )
+            .id(wallpaperViewModel.isRunning)
         }
         .menuBarExtraStyle(.menu)
     }
@@ -180,90 +181,77 @@ struct StatusMenuContent: View {
     @ObservedObject var systemService: SystemService
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            // App Title Section
-            HStack {
-                Image(systemName: "photo.on.rectangle.angled")
-                    .foregroundColor(.accentColor)
-                Text("Wallpier")
-                    .font(.headline)
+        // App Title Section (as a disabled menu item)
+        HStack {
+            Image(systemName: "photo.on.rectangle.angled")
+                .foregroundColor(.accentColor)
+            Text("Wallpier")
+                .font(.headline)
+        }
+
+        Divider()
+
+        // Status Section
+        HStack {
+            Circle()
+                .fill(wallpaperViewModel.isRunning ? .green : .secondary)
+                .frame(width: 8, height: 8)
+            Text(wallpaperViewModel.isRunning ? "Running" : "Stopped")
+                .font(.subheadline)
+        }
+
+        Text("\(wallpaperViewModel.foundImages.count) images found")
+            .font(.caption)
+            .foregroundColor(.secondary)
+
+        if let currentImage = wallpaperViewModel.currentImage {
+            Text("Current: \(currentImage.name)")
+                .font(.caption)
+                .foregroundColor(.secondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+        }
+
+        Divider()
+
+        // Quick Controls in a single horizontal row
+        HStack(spacing: 24) {
+            Button(action: { wallpaperViewModel.goToPreviousImage() }) {
+                Image(systemName: "backward.fill")
+                    .help("Previous image")
             }
-            .padding(.horizontal)
-            .padding(.vertical, 8)
+            .disabled(!wallpaperViewModel.canGoBack)
 
-            Divider()
-
-            // Status Section
-            VStack(alignment: .leading, spacing: 4) {
-                HStack {
-                    Circle()
-                        .fill(wallpaperViewModel.isRunning ? .green : .secondary)
-                        .frame(width: 8, height: 8)
-                    Text(wallpaperViewModel.isRunning ? "Running" : "Stopped")
-                        .font(.subheadline)
-                }
-
-                Text("\(wallpaperViewModel.foundImages.count) images found")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-
-                if let currentImage = wallpaperViewModel.currentImage {
-                    Text("Current: \(currentImage.name)")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                }
+            Button(action: toggleCycling) {
+                Image(systemName: wallpaperViewModel.isRunning ? "stop.fill" : "play.fill")
+                    .help(wallpaperViewModel.isRunning ? "Stop cycling" : "Start cycling")
             }
-            .padding(.horizontal)
-            .padding(.vertical, 8)
+            .disabled(wallpaperViewModel.isRunning ? false : !wallpaperViewModel.canStartCycling)
 
-            Divider()
-
-            // Quick Controls
-            VStack(spacing: 8) {
-                HStack {
-                    Button(action: { wallpaperViewModel.goToPreviousImage() }) {
-                        Image(systemName: "backward.fill")
-                    }
-                    .disabled(!wallpaperViewModel.canGoBack)
-
-                    Spacer()
-
-                    Button(action: toggleCycling) {
-                        Image(systemName: wallpaperViewModel.isRunning ? "stop.fill" : "play.fill")
-                    }
-                    .disabled(wallpaperViewModel.isRunning ? false : !wallpaperViewModel.canStartCycling)
-
-                    Spacer()
-
-                    Button(action: { wallpaperViewModel.goToNextImage() }) {
-                        Image(systemName: "forward.fill")
-                    }
-                    .disabled(!wallpaperViewModel.canAdvance)
-                }
-                .buttonStyle(.borderless)
-                .controlSize(.small)
+            Button(action: { wallpaperViewModel.goToNextImage() }) {
+                Image(systemName: "forward.fill")
+                    .help("Next image")
             }
-            .padding(.horizontal)
-            .padding(.vertical, 8)
+            .disabled(!wallpaperViewModel.canAdvance)
+        }
+        .buttonStyle(.plain)
+        .padding(.horizontal)
 
-            Divider()
+        Divider()
 
-            // Menu Items
-            Button("Open Wallpier") {
-                openMainWindow()
-            }
+        // Menu Items
+        Button("Open Wallpier") {
+            openMainWindow()
+        }
 
-            Button("Settings...") {
-                openSettings()
-            }
+        Button("Settings...") {
+            openSettings()
+        }
 
-            Divider()
+        Divider()
 
-            Button("Quit Wallpier") {
-                NSApplication.shared.terminate(nil)
-            }
+        Button("Quit Wallpier") {
+            NSApplication.shared.terminate(nil)
         }
     }
 
@@ -290,9 +278,6 @@ struct StatusMenuContent: View {
         NotificationCenter.default.post(name: .openSettings, object: nil)
     }
 }
-
-
-
 
 // MARK: - App Delegate for Additional Setup
 
@@ -335,8 +320,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.setActivationPolicy(.regular)
     }
 }
-
-
 
 // MARK: - View Extensions
 
