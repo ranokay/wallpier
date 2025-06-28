@@ -165,7 +165,7 @@ final class WallpaperViewModel: ObservableObject {
         logger.info("Wallpaper cycling started with \(self.foundImages.count) images")
     }
 
-    /// Stops wallpaper cycling and cleanup
+    /// Stops the wallpaper cycling process, resets timers and preloading, clears per-screen cycle indices, and updates the running state and status message.
     func stopCycling() {
         logger.info("Stopping wallpaper cycling")
 
@@ -254,7 +254,10 @@ final class WallpaperViewModel: ObservableObject {
         }
     }
 
-    /// Updates settings and applies changes
+    /// Updates the wallpaper cycling settings and applies changes such as folder selection, cycling interval, shuffle, and sort order.
+    /// - Parameter newSettings: The new wallpaper settings to apply.
+    /// 
+    /// If the folder path changes, scans the new folder or clears state if no folder is selected. If the cycling interval changes while cycling is active, restarts the timer. Shuffle or sort order changes update the cycling queue and reset per-screen cycle indices for multi-monitor setups.
     func updateSettings(_ newSettings: WallpaperSettings) {
         let oldSettings = settings
         settings = newSettings
@@ -367,7 +370,12 @@ final class WallpaperViewModel: ObservableObject {
         }
     }
 
-    /// Scans folder with optimized progress reporting
+    /// Asynchronously scans the specified folder for images, updating progress and handling errors.
+    /// - Parameters:
+    ///   - folderPath: The URL of the folder to scan.
+    ///   - showProgress: Indicates whether to display scan progress.
+    /// 
+    /// Uses an optimized scanning strategy based on folder size and settings, updates the list of found images, resets per-screen cycle indices, and initiates image preloading if images are found. Updates scanning state and error messages as appropriate.
     private func scanFolder(_ folderPath: URL, showProgress: Bool) async {
         logger.info("Starting optimized folder scan: \(folderPath.path)")
 
@@ -515,7 +523,9 @@ final class WallpaperViewModel: ObservableObject {
         return formatter.string(fromByteCount: Int64(bytes))
     }
 
-    /// Sets current wallpaper with performance optimization and multi-monitor support
+    /// Sets the current wallpaper(s) based on the multi-monitor configuration.
+    /// - If using the same wallpaper on all monitors, sets the current image on every screen.
+    /// - If using independent wallpapers per monitor, assigns each screen a starting image, initializing per-screen indices for cycling.
     private func setCurrentWallpaper() async {
         guard !foundImages.isEmpty else {
             updateStatus("No images available")
@@ -578,7 +588,10 @@ final class WallpaperViewModel: ObservableObject {
         await startIntelligentPreloading()
     }
 
-    /// Goes to previous wallpaper
+    /// Advances to the previous wallpaper in the cycle, applying it to all screens or individually per monitor based on multi-monitor settings.
+    /// 
+    /// In single-wallpaper mode, sets the previous image on all monitors. In multi-monitor mode, cycles each screen to its own previous image.
+    /// Updates cycle progress after changing wallpapers.
     private func setPreviousWallpaper() async {
         if settings.multiMonitorSettings.useSameWallpaperOnAllMonitors {
             // Standard single-image cycling
@@ -595,7 +608,8 @@ final class WallpaperViewModel: ObservableObject {
         updateCycleProgress()
     }
 
-    /// Sets next wallpaper for multi-monitor setup with proper cycling
+    /// Advances to the next wallpaper for each monitor, applying either the same or different images per screen based on multi-monitor settings.
+    /// - Note: If using the same wallpaper on all monitors, advances globally; otherwise, each monitor cycles independently. Updates the displayed wallpapers accordingly.
     private func setNextWallpaperMultiMonitor() async {
         guard !foundImages.isEmpty else {
             updateStatus("No images available")
@@ -625,7 +639,12 @@ final class WallpaperViewModel: ObservableObject {
         await setMultipleWallpapers(imageURLs, newImages: nextImages)
     }
 
-    /// Sets next wallpaper for independent monitor cycling
+    /// Advances the wallpaper for each monitor independently by updating their respective cycling indices.
+    /// - Parameters:
+    ///   - nextImages: A dictionary to be updated with the next image for each screen.
+    ///   - imageURLs: An array to be appended with the URLs of the next images for all screens.
+    /// 
+    /// Initializes per-screen cycling indices if not already set, then advances each screen to its next image based on its own index. Shuffle or staggered starting points are used depending on settings.
     private func setNextWallpaperIndependentMonitors(_ nextImages: inout [NSScreen: ImageFile], _ imageURLs: inout [URL]) async {
         let screens = NSScreen.screens
 
@@ -659,7 +678,7 @@ final class WallpaperViewModel: ObservableObject {
         }
     }
 
-    /// Sets previous wallpaper for multi-monitor setup with proper cycling
+    /// Sets the previous wallpaper on each monitor, using either the same image for all screens or cycling each screen independently based on multi-monitor settings.
     private func setPreviousWallpaperMultiMonitor() async {
         guard !foundImages.isEmpty else {
             updateStatus("No images available")
@@ -689,7 +708,10 @@ final class WallpaperViewModel: ObservableObject {
         await setMultipleWallpapers(imageURLs, newImages: prevImages)
     }
 
-    /// Sets previous wallpaper for independent monitor cycling
+    /// Advances each monitor to its previous wallpaper in the cycle, updating per-screen indices independently.
+    /// - Parameters:
+    ///   - prevImages: A dictionary to be updated with the previous image for each screen.
+    ///   - imageURLs: An array to be updated with the URLs of the previous images for all screens.
     private func setPreviousWallpaperIndependentMonitors(_ prevImages: inout [NSScreen: ImageFile], _ imageURLs: inout [URL]) async {
         let screens = NSScreen.screens
 
@@ -941,12 +963,14 @@ final class WallpaperViewModel: ObservableObject {
         }
     }
 
-    /// Updates status message
+    /// Updates the current status message displayed by the view model.
+    /// - Parameter message: The new status message to set.
     private func updateStatus(_ message: String) {
         statusMessage = message
     }
 
-    /// Resets screen cycle indices for fresh randomization
+    /// Resets the wallpaper cycling indices for each screen based on the current shuffle setting.
+    /// - Note: In shuffle mode, each screen starts at a random image; otherwise, starting indices are staggered across screens.
     private func resetScreenCycleIndices() {
         guard !foundImages.isEmpty else { return }
 
@@ -968,7 +992,7 @@ final class WallpaperViewModel: ObservableObject {
         logger.debug("Reset screen cycle indices for \(screens.count) screens")
     }
 
-    /// Cleanup resources
+    /// Cleans up resources and stops all ongoing operations managed by the view model.
     private func cleanup() {
         stopCycling()
         stopFolderMonitoring()
