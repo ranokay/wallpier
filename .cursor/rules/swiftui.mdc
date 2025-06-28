@@ -1,0 +1,21 @@
+---
+description:
+globs:
+alwaysApply: true
+---
+---
+description: This rule explains SwiftUI patterns and best practices for iOS, macOS, watchOS, and tvOS development.
+globs: **/*.swift
+alwaysApply: false
+---
+
+# SwiftUI rules
+
+- Use structs for views and keep them small and focused
+- Use @State for simple view-local state
+- Use @ObservableObject with @Published for shared state
+- Use @Binding to pass mutable state to child views
+- Create custom ViewModifiers for reusable styling
+- Use environment objects for dependency injection
+- Use LazyVStack and LazyHStack for large collections
+- Extract complex view logic into separate components

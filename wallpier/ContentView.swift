@@ -269,9 +269,6 @@ struct ContentView: View {
                 }
             )
         }
-        .onReceive(settingsViewModel.$settings) { newSettings in
-            wallpaperViewModel.updateSettings(newSettings)
-        }
         .onReceive(NotificationCenter.default.publisher(for: Notification.Name("TriggerWallpaperGallery"))) { _ in
             // Open wallpaper gallery from menu bar
             selectedScreenForGallery = nil
@@ -811,7 +808,7 @@ struct WallpaperThumbnail: View {
 
 // MARK: - Image Loading Actor
 
-actor ImageLoader {
+@MainActor class ImageLoader {
     func load(from url: URL, maxSize: CGFloat) async -> NSImage? {
         return await PerformanceMonitor.loadOptimizedPreview(from: url, maxSize: maxSize)
     }

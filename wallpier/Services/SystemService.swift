@@ -82,54 +82,97 @@ class SystemService: NSObject, SystemServiceProtocol, ObservableObject {
 
     func requestPermissions() async -> Bool {
         logger.info("Requesting system permissions")
+
         return await withCheckedContinuation { continuation in
-            let openPanel = NSOpenPanel()
-            openPanel.title = "Grant File Access"
-            openPanel.message = "To cycle wallpapers, Wallpier needs access to your image folders. Please select a folder containing images."
-            openPanel.canChooseFiles = false
-            openPanel.canChooseDirectories = true
-            openPanel.allowsMultipleSelection = false
-            openPanel.canCreateDirectories = false
-            // Start in Pictures directory if possible
-            let picturesURL = FileManager.default.urls(for: .picturesDirectory, in: .userDomainMask).first
-            openPanel.directoryURL = picturesURL
-            openPanel.begin { response in
-                if response == .OK {
-                    // User selected a folder, which grants access
-                    self.logger.info("User granted folder access")
-                    self.permissionStatus = .granted
-                    continuation.resume(returning: true)
-                } else {
-                    // User cancelled
-                    self.logger.info("User cancelled folder access request")
-                    self.permissionStatus = .denied
-                    continuation.resume(returning: false)
+            Task { @MainActor in
+                let openPanel = NSOpenPanel()
+                openPanel.title = "Grant File Access"
+                openPanel.message = "To cycle wallpapers, Wallpier needs access to your image folders. Please select a folder containing images."
+                openPanel.canChooseFiles = false
+                openPanel.canChooseDirectories = true
+                openPanel.allowsMultipleSelection = false
+                openPanel.canCreateDirectories = false
+                // Start in Pictures directory if possible
+                let picturesURL = FileManager.default.urls(for: .picturesDirectory, in: .userDomainMask).first
+                openPanel.directoryURL = picturesURL
+                openPanel.begin { response in
+                    if response == .OK {
+                        // User selected a folder, which grants access
+                        self.logger.info("User granted folder access")
+                        self.permissionStatus = .granted
+                        continuation.resume(returning: true)
+                    } else {
+                        // User cancelled
+                        self.logger.info("User cancelled folder access request")
+                        self.permissionStatus = .denied
+                        continuation.resume(returning: false)
+                    }
                 }
             }
         }
     }
 
     func checkPermissionStatus() -> PermissionStatus {
-        // For sandboxed apps, we consider permissions granted if:
-        // 1. The user has previously selected folders (which gives us access to those folders)
-        // 2. The app can read its own bundle and basic system info
+        logger.debug("Checking actual permission status")
 
-        // Check if we can read basic app information
-        let canReadAppBundle = true // Bundle.main.bundleURL is always non-nil for a running app bundle
+        // Get current wallpaper settings to check for existing bookmarks
+        let settings = WallpaperSettings.load()
 
-        if canReadAppBundle {
-            logger.debug("Basic app permissions confirmed")
+        // Check if we have any security-scoped bookmarks
+        guard let bookmarkData = settings.folderBookmark else {
+            logger.debug("No security-scoped bookmarks found - permissions not determined")
+            self.permissionStatus = .notDetermined
+            return .notDetermined
+        }
 
-            // In a sandboxed environment, file access is granted per-folder by user selection
-            // We'll consider this "granted" since the user will select folders as needed
-            self.permissionStatus = .granted
+        // Try to resolve the security-scoped bookmark
+        do {
+            var isStale = false
+            let url = try URL(resolvingBookmarkData: bookmarkData,
+                             options: [.withSecurityScope, .withoutUI],
+                             relativeTo: nil,
+                             bookmarkDataIsStale: &isStale)
 
-            return .granted
-        } else {
-            logger.warning("Cannot read basic app information")
+            if isStale {
+                logger.warning("Security-scoped bookmark is stale for: \(url.path)")
+                self.permissionStatus = .denied
+                return .denied
+            }
 
+            // Test if we can actually access the folder
+            if url.startAccessingSecurityScopedResource() {
+                defer {
+                    url.stopAccessingSecurityScopedResource()
+                }
+
+                // Test folder access by checking if we can enumerate contents
+                let isAccessible = FileManager.default.fileExists(atPath: url.path)
+                if isAccessible {
+                    // Try to read the folder contents as an additional verification
+                    let canReadContents = (try? FileManager.default.contentsOfDirectory(atPath: url.path)) != nil
+                    if canReadContents {
+                        logger.debug("Successfully verified folder access permissions")
+                        self.permissionStatus = .granted
+                        return .granted
+                    } else {
+                        logger.warning("Folder exists but cannot read contents - permission denied")
+                        self.permissionStatus = .denied
+                        return .denied
+                    }
+                } else {
+                    logger.warning("Cannot access folder - path may not exist: \(url.path)")
+                    self.permissionStatus = .denied
+                    return .denied
+                }
+            } else {
+                logger.warning("Failed to start accessing security-scoped resource: \(url.path)")
+                self.permissionStatus = .denied
+                return .denied
+            }
+
+        } catch {
+            logger.error("Failed to resolve security-scoped bookmark: \(error.localizedDescription)")
             self.permissionStatus = .denied
-
             return .denied
         }
     }
@@ -138,17 +181,26 @@ class SystemService: NSObject, SystemServiceProtocol, ObservableObject {
 
     func setLaunchAtStartup(_ enabled: Bool) async -> Bool {
         logger.info("Setting launch at startup: \(enabled)")
-        do {
-            if enabled {
-                try SMAppService.mainApp.register()
-            } else {
-                try await SMAppService.mainApp.unregister()
+
+        return await withCheckedContinuation { continuation in
+            Task {
+                do {
+                    if enabled {
+                        try SMAppService.mainApp.register()
+                    } else {
+                        try await SMAppService.mainApp.unregister()
+                    }
+                    await MainActor.run {
+                        self.isLaunchAtStartupEnabled = enabled
+                    }
+                    continuation.resume(returning: true)
+                } catch {
+                    await MainActor.run {
+                        self.logger.error("Failed to update launch at startup setting: \(error.localizedDescription)")
+                    }
+                    continuation.resume(returning: false)
+                }
             }
-            self.isLaunchAtStartupEnabled = enabled
-            return true
-        } catch {
-            logger.error("Failed to update launch at startup setting: \(error.localizedDescription)")
-            return false
         }
     }
 
@@ -208,15 +260,18 @@ class SystemService: NSObject, SystemServiceProtocol, ObservableObject {
     }
 
     @objc private func appDidBecomeActive() {
-        Task { await self.handleAppStateChange(.active) }
+        // Handle app becoming active directly
+        self.handleAppStateChange(.active)
     }
 
     @objc private func appDidResignActive() {
-        Task { await self.handleAppStateChange(.background) }
+        // Handle app resigning active directly
+        self.handleAppStateChange(.background)
     }
 
     @objc private func appWillTerminate() {
-        Task { await self.handleAppStateChange(.terminating) }
+        // Handle app termination directly
+        self.handleAppStateChange(.terminating)
     }
 
     // MARK: - Cleanup
