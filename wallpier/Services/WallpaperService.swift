@@ -149,8 +149,7 @@ protocol WallpaperServiceProtocol: Sendable {
                     .allowClipping: true,
                     .imageScaling: scalingMode.nsImageScaling.rawValue
                 ]
-                try workspace.setDesktopImageURL(imageURL, for: screen, options: options)
-                wallpaperDidChangePublisher.send(imageURL)
+                try await setWallpaperForScreen(imageURL, screen: screen, options: options)
             }
         } else {
             // Set different wallpapers per screen with per-monitor scaling
@@ -163,8 +162,7 @@ protocol WallpaperServiceProtocol: Sendable {
                     .allowClipping: true,
                     .imageScaling: scalingMode.nsImageScaling.rawValue
                 ]
-                try workspace.setDesktopImageURL(imageURL, for: screen, options: options)
-                wallpaperDidChangePublisher.send(imageURL)
+                try await setWallpaperForScreen(imageURL, screen: screen, options: options)
             }
         }
 
@@ -173,16 +171,20 @@ protocol WallpaperServiceProtocol: Sendable {
 
     /// Sets wallpaper for a specific screen
     func setWallpaperForScreen(_ imageURL: URL, screen: NSScreen? = nil) async throws {
+        // Default options for backward compatibility
+        let defaultOptions: [NSWorkspace.DesktopImageOptionKey: Any] = [
+            .allowClipping: true,
+            .imageScaling: NSImageScaling.scaleProportionallyUpOrDown.rawValue
+        ]
+        try await setWallpaperForScreen(imageURL, screen: screen, options: defaultOptions)
+    }
+
+    /// Sets wallpaper for a specific screen with custom options
+    func setWallpaperForScreen(_ imageURL: URL, screen: NSScreen? = nil, options: [NSWorkspace.DesktopImageOptionKey: Any]) async throws {
         return try await withCheckedThrowingContinuation { continuation in
             DispatchQueue.main.async {
                 let targetScreen = screen ?? NSScreen.main ?? NSScreen.screens.first!
                 do {
-                    // Create options dictionary with proper types for Objective-C compatibility
-                    let options: [NSWorkspace.DesktopImageOptionKey: Any] = [
-                        .allowClipping: true,
-                        .imageScaling: NSImageScaling.scaleProportionallyUpOrDown.rawValue
-                    ]
-
                     try self.workspace.setDesktopImageURL(imageURL, for: targetScreen, options: options)
                     self.logger.info("Successfully set wallpaper for screen \(targetScreen.localizedName)")
                     self.wallpaperDidChangePublisher.send(imageURL)
