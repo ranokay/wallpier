@@ -10,8 +10,6 @@ import OSLog
 import AppKit
 import Darwin
 
-// Allow NSImage to be used as Sendable in async contexts
-extension NSImage: @unchecked @retroactive Sendable {}
 
 /// Performance monitoring utility for tracking app metrics
 final class PerformanceMonitor: ObservableObject {
