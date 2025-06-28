@@ -148,23 +148,21 @@ extension CycleConfiguration {
         return jumpToImage(at: index) != nil
     }
 
-    /// Shuffles the image queue and resets position
+    /// Shuffles the image queue with proper randomization
     mutating func shuffleQueue() {
         guard !imageQueue.isEmpty else { return }
 
-        // Keep current image at front after shuffle
-        let currentImage = self.currentImage
-        imageQueue.shuffle()
+        // Use a properly seeded random number generator for true randomization
+        var rng = SystemRandomNumberGenerator()
 
-        // Move current image to front if it exists
-        if let current = currentImage,
-            let newIndex = imageQueue.firstIndex(of: current)
-        {
-            imageQueue.swapAt(0, newIndex)
-            currentIndex = 0
-        } else {
-            currentIndex = 0
+        // Perform Fisher-Yates shuffle for better randomization
+        for i in (1..<imageQueue.count).reversed() {
+            let j = Int.random(in: 0...i, using: &rng)
+            imageQueue.swapAt(i, j)
         }
+
+        // Start at a random position in the shuffled queue (not always 0)
+        currentIndex = Int.random(in: 0..<imageQueue.count, using: &rng)
 
         statistics.incrementShuffle()
     }

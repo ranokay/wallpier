@@ -277,14 +277,17 @@ struct ContentView: View {
             selectedScreenForGallery = nil
             showingWallpaperGallery = true
         }
-        .task {
-            await wallpaperViewModel.loadInitialData()
-        }
         .onAppear {
             // Set up the settings callback to ensure proper updates
             settingsViewModel.onSettingsSaved = { newSettings in
                 wallpaperViewModel.updateSettings(newSettings)
             }
+
+            // Sync initial settings immediately to ensure WallpaperViewModel has the correct state
+            wallpaperViewModel.updateSettings(settingsViewModel.settings)
+        }
+        .task {
+            await wallpaperViewModel.loadInitialData()
         }
     }
 
