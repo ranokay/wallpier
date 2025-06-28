@@ -231,10 +231,6 @@ enum WallpaperError: LocalizedError {
             return (screen: screen, displayName: displayName)
         }
     }
-
-    // @objc private func wallpaperDidChange(notification: NSNotification) {
-    //     // This handler is now unused, as there is no system notification for wallpaper changes.
-    // }
 }
 
 /// Performance logging utility

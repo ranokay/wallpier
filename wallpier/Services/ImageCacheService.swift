@@ -9,7 +9,6 @@ import Foundation
 import AppKit
 import OSLog
 import Combine
-import os
 
 /// Protocol for image caching operations
 @preconcurrency protocol ImageCacheServiceProtocol: Sendable {
