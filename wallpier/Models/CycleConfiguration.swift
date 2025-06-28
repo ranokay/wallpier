@@ -142,13 +142,16 @@ extension CycleConfiguration {
         return currentImage
     }
 
-    /// Jumps to a specific image by file
+    /// Jumps to the specified image in the queue if it exists.
+    /// - Parameter imageFile: The image to jump to.
+    /// - Returns: `true` if the image was found and the jump was successful; otherwise, `false`.
     mutating func jumpToImage(_ imageFile: ImageFile) -> Bool {
         guard let index = imageQueue.firstIndex(of: imageFile) else { return false }
         return jumpToImage(at: index) != nil
     }
 
-    /// Shuffles the image queue with proper randomization
+    /// Randomly shuffles the image queue and sets the current index to a random position in the shuffled queue.
+    /// Increments the shuffle count in the session statistics.
     mutating func shuffleQueue() {
         guard !imageQueue.isEmpty else { return }
 

@@ -394,6 +394,8 @@ struct OptimizedImageView: View {
                         .fill(Color(NSColor.controlBackgroundColor))
                         .overlay {
                             ProgressView()
+                                .controlSize(.small)
+                                .frame(width: 20, height: 20)
                         }
                 }
             }
@@ -528,6 +530,7 @@ struct ScreenPreviewCard: View {
                         .overlay {
                             ProgressView()
                                 .controlSize(.small)
+                                .frame(width: 16, height: 16)
                         }
                 } else {
                     RoundedRectangle(cornerRadius: 6)
@@ -779,6 +782,7 @@ struct WallpaperThumbnail: View {
                         .overlay {
                             ProgressView()
                                 .controlSize(.small)
+                                .frame(width: 16, height: 16)
                         }
                 }
             }

@@ -82,25 +82,25 @@ struct SettingsView: View {
 
                 Spacer()
 
-                // Footer with action buttons
+                // Footer with save/cancel buttons
                 VStack(spacing: 8) {
                     Divider()
 
-                    HStack(spacing: 12) {
+                    VStack(spacing: 8) {
+                        Button("Save") {
+                            viewModel.saveSettings()
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.large)
+                        .disabled(viewModel.isSaving || !viewModel.hasUnsavedChanges || !viewModel.validationErrors.isEmpty)
+
                         Button("Cancel") {
                             viewModel.cancelChanges()
                             dismiss()
                         }
                         .buttonStyle(.bordered)
                         .controlSize(.large)
-
-                        Button("Save") {
-                            viewModel.saveSettings()
-                            dismiss()
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .controlSize(.large)
-                        .disabled(!viewModel.canSave)
+                        .disabled(viewModel.isSaving)
                     }
                     .padding(.horizontal, 16)
                     .padding(.vertical, 16)
@@ -163,6 +163,13 @@ struct SettingsView: View {
         }
         .frame(width: 750, height: 550) // Fixed dimensions
         .background(Color(NSColor.windowBackgroundColor))
+        .overlay(
+            // Toast notification overlay
+            ToastView(
+                isPresented: $viewModel.showToast,
+                message: viewModel.toastMessage
+            )
+        )
         .alert("Validation Errors", isPresented: .constant(!viewModel.validationErrors.isEmpty)) {
             Button("OK") { }
         } message: {
@@ -279,7 +286,6 @@ struct GeneralSettingsView: View {
 
                         VStack(alignment: .leading, spacing: 8) {
                             let isDockHidden = viewModel.settings.systemIntegration?.hideDockIcon ?? false
-                            let showsMenuBar = viewModel.settings.showMenuBarIcon
 
                             HStack {
                                 VStack(alignment: .leading, spacing: 4) {
@@ -292,7 +298,7 @@ struct GeneralSettingsView: View {
                                 Spacer()
                             }
 
-                            SettingsToggleRow(
+                                                        SettingsToggleRow(
                                 title: "Show menu bar icon",
                                 description: "Display a menu bar icon for quick access",
                                 isOn: $viewModel.settings.showMenuBarIcon
@@ -922,6 +928,46 @@ struct SettingsPickerRow<SelectionValue: Hashable>: View {
             .pickerStyle(.menu)
             .frame(maxWidth: 300, alignment: .leading)
         }
+    }
+}
+
+// MARK: - Toast Notification
+
+struct ToastView: View {
+    @Binding var isPresented: Bool
+    let message: String
+
+    var body: some View {
+        VStack {
+            Spacer()
+
+            if isPresented {
+                HStack(spacing: 12) {
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundColor(.white)
+                        .font(.system(size: 16, weight: .medium))
+
+                    Text(message)
+                        .foregroundColor(.white)
+                        .font(.system(size: 14, weight: .medium))
+                        .multilineTextAlignment(.leading)
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 12)
+                .background(
+                    RoundedRectangle(cornerRadius: 8)
+                        .fill(Color.green)
+                        .shadow(color: .black.opacity(0.2), radius: 4, x: 0, y: 2)
+                )
+                .transition(.asymmetric(
+                    insertion: .move(edge: .bottom).combined(with: .opacity),
+                    removal: .move(edge: .bottom).combined(with: .opacity)
+                ))
+                .animation(.spring(response: 0.5, dampingFraction: 0.8), value: isPresented)
+            }
+        }
+        .padding(.bottom, 20)
+        .allowsHitTesting(false) // Allow clicks to pass through
     }
 }
 

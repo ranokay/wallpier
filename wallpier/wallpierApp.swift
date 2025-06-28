@@ -34,6 +34,7 @@ struct wallpierApp: App {
         NSApplication.shared.delegate = AppDelegate.shared
     }
 
+    @SceneBuilder
     var body: some Scene {
         // Main Window
         WindowGroup("Wallpier") {
@@ -52,7 +53,7 @@ struct wallpierApp: App {
                 }
                 .onReceive(NotificationCenter.default.publisher(for: .openWallpaperGallery)) { _ in
                     // Open wallpaper gallery - trigger the browse button action
-                    if let window = NSApp.mainWindow?.contentView {
+                    if NSApp.mainWindow?.contentView != nil {
                         NotificationCenter.default.post(name: Notification.Name("TriggerWallpaperGallery"), object: nil)
                     }
                 }
@@ -127,15 +128,14 @@ struct wallpierApp: App {
         .defaultSize(width: 750, height: 550)
         .defaultPosition(.center)
 
-        // Menu Bar Extra with fixes for state and layout
+        // Menu Bar Extra - always present but content controlled by settings
         MenuBarExtra("Wallpier", systemImage: "photo.on.rectangle.angled") {
-            // Use an ID to force the menu to update when state changes
             StatusMenuContent(
                 wallpaperViewModel: wallpaperViewModel,
                 settingsViewModel: settingsViewModel,
                 systemService: systemService
             )
-            .id(wallpaperViewModel.isRunning)
+            .id("\(wallpaperViewModel.isRunning)_\(UUID())")
         }
         .menuBarExtraStyle(.menu)
     }
@@ -184,77 +184,113 @@ struct StatusMenuContent: View {
     @ObservedObject var systemService: SystemService
 
     var body: some View {
-        // App Title Section (as a disabled menu item)
-        HStack {
-            Image(systemName: "photo.on.rectangle.angled")
-                .foregroundColor(.accentColor)
-            Text("Wallpier")
-                .font(.headline)
-        }
+        if settingsViewModel.settings.showMenuBarIcon {
+            // Full menu content when enabled
+            // Status Section
+            HStack {
+                Circle()
+                    .fill(wallpaperViewModel.isRunning ? .green : .secondary)
+                    .frame(width: 8, height: 8)
+                Text(wallpaperViewModel.isRunning ? "Running" : "Stopped")
+                    .font(.subheadline)
+            }
 
-        Divider()
-
-        // Status Section
-        HStack {
-            Circle()
-                .fill(wallpaperViewModel.isRunning ? .green : .secondary)
-                .frame(width: 8, height: 8)
-            Text(wallpaperViewModel.isRunning ? "Running" : "Stopped")
-                .font(.subheadline)
-        }
-
-        Text("\(wallpaperViewModel.foundImages.count) images found")
-            .font(.caption)
-            .foregroundColor(.secondary)
-
-        if let currentImage = wallpaperViewModel.currentImage {
-            Text("Current: \(currentImage.name)")
+            Text("\(wallpaperViewModel.foundImages.count) images found")
                 .font(.caption)
                 .foregroundColor(.secondary)
-                .lineLimit(1)
-                .truncationMode(.middle)
-        }
 
-        Divider()
+            if let currentImage = wallpaperViewModel.currentImage {
+                Text("Current: \(currentImage.name)")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
 
-        // Quick Controls in a single horizontal row
-        HStack(spacing: 24) {
-            Button(action: { wallpaperViewModel.goToPreviousImage() }) {
-                Image(systemName: "backward.fill")
+                        Divider()
+
+                        // Quick Controls - custom horizontal layout that works in menu bar
+            VStack(spacing: 0) {
+                HStack(spacing: 16) {
+                    Button(action: { wallpaperViewModel.goToPreviousImage() }) {
+                        HStack(spacing: 4) {
+                            Image(systemName: "backward.fill")
+                                .frame(width: 12, height: 12)
+                            Text("Previous")
+                                .font(.caption)
+                        }
+                    }
+                    .disabled(!wallpaperViewModel.canGoBack)
+                    .buttonStyle(.borderless)
                     .help("Previous image")
-            }
-            .disabled(!wallpaperViewModel.canGoBack)
 
-            Button(action: toggleCycling) {
-                Image(systemName: wallpaperViewModel.isRunning ? "stop.fill" : "play.fill")
+                    Button(action: toggleCycling) {
+                        HStack(spacing: 4) {
+                            Image(systemName: wallpaperViewModel.isRunning ? "stop.fill" : "play.fill")
+                                .frame(width: 12, height: 12)
+                            Text(wallpaperViewModel.isRunning ? "Stop" : "Start")
+                                .font(.caption)
+                        }
+                    }
+                    .disabled(wallpaperViewModel.isRunning ? false : !wallpaperViewModel.canStartCycling)
+                    .buttonStyle(.borderless)
                     .help(wallpaperViewModel.isRunning ? "Stop cycling" : "Start cycling")
-            }
-            .disabled(wallpaperViewModel.isRunning ? false : !wallpaperViewModel.canStartCycling)
 
-            Button(action: { wallpaperViewModel.goToNextImage() }) {
-                Image(systemName: "forward.fill")
+                    Button(action: { wallpaperViewModel.goToNextImage() }) {
+                        HStack(spacing: 4) {
+                            Image(systemName: "forward.fill")
+                                .frame(width: 12, height: 12)
+                            Text("Next")
+                                .font(.caption)
+                        }
+                    }
+                    .disabled(!wallpaperViewModel.canAdvance)
+                    .buttonStyle(.borderless)
                     .help("Next image")
+                }
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .background(Color.secondary.opacity(0.1))
+                .cornerRadius(6)
             }
-            .disabled(!wallpaperViewModel.canAdvance)
-        }
-        .buttonStyle(.plain)
-        .padding(.horizontal)
 
-        Divider()
+            Divider()
 
-        // Menu Items
-        Button("Open Wallpier") {
-            openMainWindow()
-        }
+            // Menu Items
+            Button("Open Wallpier") {
+                openMainWindow()
+            }
 
-        Button("Settings...") {
-            openSettings()
-        }
+            Button("Settings...") {
+                openSettings()
+            }
 
-        Divider()
+            Divider()
 
-        Button("Quit Wallpier") {
-            NSApplication.shared.terminate(nil)
+            Button("Quit Wallpier") {
+                NSApplication.shared.terminate(nil)
+            }
+        } else {
+            // Minimal menu when disabled - just essential functions
+            Text("Menu Bar Icon Disabled")
+                .font(.caption)
+                .foregroundColor(.secondary)
+
+            Divider()
+
+            Button("Open Wallpier") {
+                openMainWindow()
+            }
+
+            Button("Settings...") {
+                openSettings()
+            }
+
+            Divider()
+
+            Button("Quit Wallpier") {
+                NSApplication.shared.terminate(nil)
+            }
         }
     }
 

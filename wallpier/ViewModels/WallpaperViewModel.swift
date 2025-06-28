@@ -51,6 +51,7 @@ final class WallpaperViewModel: ObservableObject {
     private var cancellables = Set<AnyCancellable>()
     private var cycleTimer: Timer?
     private var countdownTimer: Timer?
+    private var idleCleanupTimer: Timer?
     private var cycleConfiguration = CycleConfiguration()
 
     // Background processing queues
@@ -78,6 +79,12 @@ final class WallpaperViewModel: ObservableObject {
     private var lastUIUpdate = Date()
     private let uiUpdateInterval: TimeInterval = 0.1 // Max 10 updates per second
 
+    // Scan throttling to prevent redundant scans
+    private var lastScanTime = Date.distantPast
+    private var lastScannedPath: String?
+    private let scanThrottleInterval: TimeInterval = 2.0 // Min 2 seconds between scans of same folder
+    private var hasCompletedInitialScan = false // Track if we've done the initial scan
+
     // MARK: - Initialization
 
     init(wallpaperService: WallpaperServiceProtocol? = nil,
@@ -87,13 +94,14 @@ final class WallpaperViewModel: ObservableObject {
 
         self.wallpaperService = wallpaperService ?? WallpaperService()
         self.imageScanner = imageScanner ?? ImageScannerService()
-        self.imageCache = imageCache ?? ImageCacheService(maxCacheSizeMB: 50) // Reduced to 50MB for large images
+        self.imageCache = imageCache ?? ImageCacheService(maxCacheSizeMB: 25) // Further reduced to 25MB
         self.fileMonitor = fileMonitor ?? FileMonitorService()
 
         setupFileMonitoring()
         setupBindings()
         loadSavedState()
         loadAvailableScreens()
+        startIdleMemoryCleanup()
 
         logger.info("WallpaperViewModel initialized with performance optimizations")
     }
@@ -102,6 +110,7 @@ final class WallpaperViewModel: ObservableObject {
         // Perform synchronous cleanup only - can't call async methods in deinit
         cycleTimer?.invalidate()
         countdownTimer?.invalidate()
+        idleCleanupTimer?.invalidate()
         fileMonitor.stopMonitoring()
         preloadingTask?.cancel()
         cancellables.removeAll()
@@ -109,17 +118,26 @@ final class WallpaperViewModel: ObservableObject {
 
     // MARK: - Public Interface
 
-    /// Loads initial data asynchronously
+            /// Loads initial data asynchronously
     func loadInitialData() async {
         logger.info("Loading initial data")
 
         guard let folderPath = settings.folderPath else {
+            logger.info("No folder path in settings - showing folder selection prompt")
             updateStatus("No folder selected")
             return
         }
 
+        logger.info("Found saved folder path: \(folderPath.path)")
         selectedFolderPath = folderPath
-        await scanFolder(folderPath, showProgress: false)
+
+        // Only scan if we don't have images yet (avoid duplicate scans from updateSettings)
+        if foundImages.isEmpty && !isScanning {
+            logger.info("No images found yet, initiating folder scan")
+            await scanFolder(folderPath, showProgress: false)
+        } else {
+            logger.info("Images already loaded (\(self.foundImages.count) images) or scan in progress, skipping scan")
+        }
     }
 
     func startCycling() async {
@@ -165,7 +183,7 @@ final class WallpaperViewModel: ObservableObject {
         logger.info("Wallpaper cycling started with \(self.foundImages.count) images")
     }
 
-    /// Stops wallpaper cycling and cleanup
+    /// Stops the wallpaper cycling process, resets timers and preloading, clears per-screen cycle indices, and updates the running state and status message.
     func stopCycling() {
         logger.info("Stopping wallpaper cycling")
 
@@ -178,6 +196,12 @@ final class WallpaperViewModel: ObservableObject {
 
         // Clear screen cycle indices to ensure fresh start next time
         screenCycleIndices.removeAll()
+
+        // Aggressively clean cache when stopping to reduce memory usage in standby
+        Task {
+            imageCache.clearCache()
+            logger.info("Cleared cache on stop to reduce memory usage")
+        }
 
         updateStatus("Cycling stopped")
 
@@ -254,16 +278,22 @@ final class WallpaperViewModel: ObservableObject {
         }
     }
 
-    /// Updates settings and applies changes
+    /// Updates the wallpaper cycling settings and applies changes such as folder selection, cycling interval, shuffle, and sort order.
+    /// - Parameter newSettings: The new wallpaper settings to apply.
+    ///
+    /// If the folder path changes, scans the new folder or clears state if no folder is selected. If the cycling interval changes while cycling is active, restarts the timer. Shuffle or sort order changes update the cycling queue and reset per-screen cycle indices for multi-monitor setups.
     func updateSettings(_ newSettings: WallpaperSettings) {
         let oldSettings = settings
         settings = newSettings
+
+        logger.info("Settings updated - old folder: \(oldSettings.folderPath?.path ?? "none"), new folder: \(newSettings.folderPath?.path ?? "none")")
 
         // Apply folder change if needed
         if oldSettings.folderPath != newSettings.folderPath {
             selectedFolderPath = newSettings.folderPath
 
             if let folderPath = newSettings.folderPath {
+                // Always scan when folder actually changes
                 Task {
                     await scanFolder(folderPath, showProgress: true)
                 }
@@ -271,21 +301,24 @@ final class WallpaperViewModel: ObservableObject {
                 // Clear current state if no folder is selected
                 foundImages = []
                 currentImage = nil
+                currentImages.removeAll()
                 updateStatus("No folder selected")
             }
-        } else if newSettings.folderPath != nil {
-            // Even if it's the same folder, ensure state is properly synced
-            selectedFolderPath = newSettings.folderPath
+        } else if let folderPath = newSettings.folderPath {
+            // Same folder, but ensure we're synced (important for app startup)
+            selectedFolderPath = folderPath
 
-            // If we don't have images but should, trigger a scan
+            // Scan if we don't have images yet (e.g., on app startup)
             if foundImages.isEmpty && !isScanning {
-                Task {
-                    await scanFolder(newSettings.folderPath!, showProgress: false)
+                // Check if folder is accessible before scanning
+                if FileManager.default.fileExists(atPath: folderPath.path) {
+                    Task {
+                        await scanFolder(folderPath, showProgress: false)
+                    }
+                } else {
+                    logger.warning("Skipping scan - folder not accessible: \(folderPath.path)")
+                    updateStatus("Selected folder is not accessible")
                 }
-            } else if !foundImages.isEmpty {
-                // Update current image display and status
-                currentImage = cycleConfiguration.currentImage
-                updateStatus("Found \(foundImages.count) images")
             }
         }
 
@@ -306,6 +339,20 @@ final class WallpaperViewModel: ObservableObject {
                 cycleConfiguration.sortQueue(newSettings.sortOrder)
                 // Reset screen indices for new order
                 resetScreenCycleIndices()
+            }
+
+            // Update preview after shuffle/sort changes
+            if !foundImages.isEmpty {
+                currentImage = cycleConfiguration.currentImage
+                setupInitialMultiMonitorPreview()
+            }
+        }
+
+        // Apply multi-monitor setting changes
+        if oldSettings.multiMonitorSettings.useSameWallpaperOnAllMonitors != newSettings.multiMonitorSettings.useSameWallpaperOnAllMonitors {
+            // Update preview when multi-monitor mode changes
+            if !foundImages.isEmpty {
+                setupInitialMultiMonitorPreview()
             }
         }
     }
@@ -367,14 +414,31 @@ final class WallpaperViewModel: ObservableObject {
         }
     }
 
-    /// Scans folder with optimized progress reporting
-    private func scanFolder(_ folderPath: URL, showProgress: Bool) async {
+    /// Asynchronously scans the specified folder for images, updating progress and handling errors.
+    /// - Parameters:
+    ///   - folderPath: The URL of the folder to scan.
+    ///   - showProgress: Indicates whether to display scan progress.
+    ///
+    /// Uses an optimized scanning strategy based on folder size and settings, updates the list of found images, resets per-screen cycle indices, and initiates image preloading if images are found. Updates scanning state and error messages as appropriate.
+        private func scanFolder(_ folderPath: URL, showProgress: Bool) async {
+        // Throttle redundant scans of the same folder, BUT allow initial scan on app startup
+        let currentPath = folderPath.path
+        let timeSinceLastScan = Date().timeIntervalSince(lastScanTime)
+
+        if hasCompletedInitialScan && currentPath == lastScannedPath && timeSinceLastScan < scanThrottleInterval {
+            logger.debug("Skipping redundant scan of \(currentPath) (scanned \(String(format: "%.1f", timeSinceLastScan))s ago)")
+            return
+        }
+
         logger.info("Starting optimized folder scan: \(folderPath.path)")
 
         guard !isScanning else {
             logger.warning("Scan already in progress")
             return
         }
+
+        lastScanTime = Date()
+        lastScannedPath = currentPath
 
         isScanning = true
         scanProgress = 0
@@ -409,15 +473,38 @@ final class WallpaperViewModel: ObservableObject {
 
             await MainActor.run {
                 foundImages = images
-                currentImage = cycleConfiguration.currentImage
                 scanProgress = 0
                 isScanning = false
 
                 // Clear screen cycle indices since we have a new image list
                 screenCycleIndices.removeAll()
 
+                // Set up cycle configuration with new images
+                if !images.isEmpty {
+                    cycleConfiguration.updateQueue(images, preservePosition: false)
+
+                    // Apply shuffle or sort based on current settings
+                    if settings.isShuffleEnabled {
+                        cycleConfiguration.shuffleQueue()
+                    } else {
+                        cycleConfiguration.sortQueue(settings.sortOrder)
+                    }
+
+                    // Set the first image as current for preview
+                    currentImage = cycleConfiguration.currentImage
+
+                    // Set up multi-monitor preview if needed
+                    setupInitialMultiMonitorPreview()
+                } else {
+                    currentImage = nil
+                    currentImages.removeAll()
+                }
+
                 let message = "Found \(images.count) images in \(String(format: "%.3f", elapsed))s"
                 updateStatus(message)
+
+                // Mark that we've completed at least one scan (for throttling logic)
+                hasCompletedInitialScan = true
 
                 logger.info("Scan completed: \(message)")
             }
@@ -463,35 +550,34 @@ final class WallpaperViewModel: ObservableObject {
         }
     }
 
-    /// Performs conservative preloading based on cycle position and memory pressure
+    /// Performs ultra-conservative preloading based on cycle position and memory pressure
     private func performIntelligentPreloading() async {
-        // Check memory pressure first
+        // Check memory pressure first with stricter limit
         let memoryUsage = getCurrentMemoryUsage()
-        guard memoryUsage < 500 * 1024 * 1024 else { // 500MB limit
+        guard memoryUsage < 150 * 1024 * 1024 else { // Much stricter 150MB limit
             logger.warning("Skipping preload due to memory pressure: \(self.formatBytes(memoryUsage))")
+            return
+        }
+
+        // Only preload if actively cycling
+        guard isRunning else {
+            logger.debug("Skipping preload - not actively cycling")
             return
         }
 
         let currentIndex = cycleConfiguration.currentIndex
         var urlsToPreload: [URL] = []
 
-        // Much more conservative preloading - only 1-2 images ahead
-        let conservativeDistance = min(2, preloadDistance)
-
-        // Preload only next image(s)
-        for i in 1...conservativeDistance {
-            let nextIndex = (currentIndex + i) % foundImages.count
-            if nextIndex < foundImages.count {
-                urlsToPreload.append(foundImages[nextIndex].url)
-            }
+        // Ultra-conservative preloading - only next image when actively cycling
+        let nextIndex = (currentIndex + 1) % foundImages.count
+        if nextIndex < foundImages.count {
+            urlsToPreload.append(foundImages[nextIndex].url)
         }
-
-        // No previous image preloading to save memory
 
         guard !urlsToPreload.isEmpty else { return }
 
         await imageCache.preloadImages(urlsToPreload, priority: .utility)
-        logger.debug("Conservatively preloaded \(urlsToPreload.count) images")
+        logger.debug("Ultra-conservatively preloaded \(urlsToPreload.count) image")
     }
 
     /// Gets current app memory usage
@@ -515,7 +601,9 @@ final class WallpaperViewModel: ObservableObject {
         return formatter.string(fromByteCount: Int64(bytes))
     }
 
-    /// Sets current wallpaper with performance optimization and multi-monitor support
+    /// Sets the current wallpaper(s) based on the multi-monitor configuration.
+    /// - If using the same wallpaper on all monitors, sets the current image on every screen.
+    /// - If using independent wallpapers per monitor, assigns each screen a starting image, initializing per-screen indices for cycling.
     private func setCurrentWallpaper() async {
         guard !foundImages.isEmpty else {
             updateStatus("No images available")
@@ -578,7 +666,10 @@ final class WallpaperViewModel: ObservableObject {
         await startIntelligentPreloading()
     }
 
-    /// Goes to previous wallpaper
+    /// Advances to the previous wallpaper in the cycle, applying it to all screens or individually per monitor based on multi-monitor settings.
+    ///
+    /// In single-wallpaper mode, sets the previous image on all monitors. In multi-monitor mode, cycles each screen to its own previous image.
+    /// Updates cycle progress after changing wallpapers.
     private func setPreviousWallpaper() async {
         if settings.multiMonitorSettings.useSameWallpaperOnAllMonitors {
             // Standard single-image cycling
@@ -595,7 +686,8 @@ final class WallpaperViewModel: ObservableObject {
         updateCycleProgress()
     }
 
-    /// Sets next wallpaper for multi-monitor setup with proper cycling
+    /// Advances to the next wallpaper for each monitor, applying either the same or different images per screen based on multi-monitor settings.
+    /// - Note: If using the same wallpaper on all monitors, advances globally; otherwise, each monitor cycles independently. Updates the displayed wallpapers accordingly.
     private func setNextWallpaperMultiMonitor() async {
         guard !foundImages.isEmpty else {
             updateStatus("No images available")
@@ -625,7 +717,12 @@ final class WallpaperViewModel: ObservableObject {
         await setMultipleWallpapers(imageURLs, newImages: nextImages)
     }
 
-    /// Sets next wallpaper for independent monitor cycling
+    /// Advances the wallpaper for each monitor independently by updating their respective cycling indices.
+    /// - Parameters:
+    ///   - nextImages: A dictionary to be updated with the next image for each screen.
+    ///   - imageURLs: An array to be appended with the URLs of the next images for all screens.
+    ///
+    /// Initializes per-screen cycling indices if not already set, then advances each screen to its next image based on its own index. Shuffle or staggered starting points are used depending on settings.
     private func setNextWallpaperIndependentMonitors(_ nextImages: inout [NSScreen: ImageFile], _ imageURLs: inout [URL]) async {
         let screens = NSScreen.screens
 
@@ -659,7 +756,7 @@ final class WallpaperViewModel: ObservableObject {
         }
     }
 
-    /// Sets previous wallpaper for multi-monitor setup with proper cycling
+    /// Sets the previous wallpaper on each monitor, using either the same image for all screens or cycling each screen independently based on multi-monitor settings.
     private func setPreviousWallpaperMultiMonitor() async {
         guard !foundImages.isEmpty else {
             updateStatus("No images available")
@@ -689,7 +786,10 @@ final class WallpaperViewModel: ObservableObject {
         await setMultipleWallpapers(imageURLs, newImages: prevImages)
     }
 
-    /// Sets previous wallpaper for independent monitor cycling
+    /// Advances each monitor to its previous wallpaper in the cycle, updating per-screen indices independently.
+    /// - Parameters:
+    ///   - prevImages: A dictionary to be updated with the previous image for each screen.
+    ///   - imageURLs: An array to be updated with the URLs of the previous images for all screens.
     private func setPreviousWallpaperIndependentMonitors(_ prevImages: inout [NSScreen: ImageFile], _ imageURLs: inout [URL]) async {
         let screens = NSScreen.screens
 
@@ -893,6 +993,23 @@ final class WallpaperViewModel: ObservableObject {
         }
     }
 
+    /// Starts idle memory cleanup timer to reduce memory usage when not cycling
+    private func startIdleMemoryCleanup() {
+        idleCleanupTimer = Timer.scheduledTimer(withTimeInterval: 180.0, repeats: true) { [weak self] _ in
+            guard let self = self else { return }
+
+            // Only clean up when not actively cycling
+            Task { @MainActor in
+                if !self.isRunning {
+                    await self.imageCache.optimizeCache()
+                    self.logger.debug("Performed idle memory cleanup")
+                }
+            }
+        }
+
+        logger.debug("Started idle memory cleanup timer (3 minutes interval)")
+    }
+
     /// Starts preloading task
     private func startPreloading() {
         Task {
@@ -941,12 +1058,54 @@ final class WallpaperViewModel: ObservableObject {
         }
     }
 
-    /// Updates status message
+    /// Updates the current status message displayed by the view model.
+    /// - Parameter message: The new status message to set.
     private func updateStatus(_ message: String) {
         statusMessage = message
     }
 
-    /// Resets screen cycle indices for fresh randomization
+    /// Sets up initial multi-monitor preview without actually setting wallpapers
+    private func setupInitialMultiMonitorPreview() {
+        guard !foundImages.isEmpty else { return }
+
+        let screens = NSScreen.screens
+
+        if settings.multiMonitorSettings.useSameWallpaperOnAllMonitors {
+            // Use the same first image for all screens in preview
+            if let firstImage = cycleConfiguration.currentImage {
+                for screen in screens {
+                    currentImages[screen] = firstImage
+                }
+            }
+        } else {
+            // Set up different images for each screen for preview
+            var initialImages: [NSScreen: ImageFile] = [:]
+
+            // Initialize screen cycle indices
+            screenCycleIndices.removeAll()
+
+            for (screenIndex, screen) in screens.enumerated() {
+                let startIndex: Int
+                if settings.isShuffleEnabled {
+                    // Random starting point for each screen
+                    startIndex = Int.random(in: 0..<foundImages.count)
+                } else {
+                    // Staggered starting points for each screen
+                    startIndex = screenIndex % foundImages.count
+                }
+
+                screenCycleIndices[screen] = startIndex
+                initialImages[screen] = foundImages[startIndex]
+            }
+
+            currentImages = initialImages
+        }
+
+        logger.debug("Set up initial multi-monitor preview for \(screens.count) screens")
+    }
+
+    /// Resets the wallpaper cycling indices for each screen based on the current shuffle setting.
+    /// - Note: In shuffle mode, each screen starts at a random image; otherwise, starting indices are staggered across screens.
     private func resetScreenCycleIndices() {
         guard !foundImages.isEmpty else { return }
 
@@ -968,7 +1127,7 @@ final class WallpaperViewModel: ObservableObject {
         logger.debug("Reset screen cycle indices for \(screens.count) screens")
     }
 
-    /// Cleanup resources
+    /// Cleans up resources and stops all ongoing operations managed by the view model.
     private func cleanup() {
         stopCycling()
         stopFolderMonitoring()

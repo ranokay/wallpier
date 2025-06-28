@@ -110,8 +110,8 @@ import Combine
         }
     }
 
-    init(maxCacheSizeMB: Int = 100) {
-        self.maxCacheSize = max(10, min(maxCacheSizeMB, 500)) // Clamp to reasonable range
+    init(maxCacheSizeMB: Int = 25) {
+        self.maxCacheSize = max(5, min(maxCacheSizeMB, 100)) // Much more conservative range
         configureCache()
         setupMemoryManagement()
 
@@ -146,15 +146,7 @@ import Combine
 
     /// Sets up memory pressure monitoring and automatic cleanup
     private func setupMemoryManagement() {
-        // Monitor app state changes
-        NotificationCenter.default.addObserver(
-            forName: NSApplication.didBecomeActiveNotification,
-            object: nil,
-            queue: .main
-        ) { [weak self] _ in
-            Task { await self?.optimizeCache() }
-        }
-
+        // Only perform background cleanup when app goes inactive (not optimization on every activation)
         NotificationCenter.default.addObserver(
             forName: NSApplication.didResignActiveNotification,
             object: nil,
@@ -163,12 +155,12 @@ import Combine
             Task { await self?.performBackgroundCleanup() }
         }
 
-        // Periodic optimization and statistics reporting
-        Timer.scheduledTimer(withTimeInterval: 300, repeats: true) { [weak self] _ in
+        // Periodic optimization (less frequent) and statistics reporting
+        Timer.scheduledTimer(withTimeInterval: 600, repeats: true) { [weak self] _ in
             Task { await self?.optimizeCache() }
         }
 
-        Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
+        Timer.scheduledTimer(withTimeInterval: 300, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 self?.logCacheStatistics()
             }
@@ -193,9 +185,9 @@ import Combine
             return
         }
 
-        // Check memory pressure before caching
+        // Check memory pressure before caching with much stricter limit
         let currentMemory = getCurrentMemoryUsage()
-        if currentMemory > 300 * 1024 * 1024 { // 300MB limit
+        if currentMemory > 150 * 1024 * 1024 { // Much stricter 150MB limit
             logger.warning("Rejecting cache due to memory pressure: \(self.formatBytes(currentMemory))")
             Task { await performAggressiveCleanup() }
             return
@@ -289,27 +281,27 @@ import Combine
         }
     }
 
-    /// Batch preloading with memory pressure and concurrency control
+    /// Batch preloading with strict memory pressure and concurrency control
     func preloadImages(_ urls: [URL], priority: TaskPriority = .medium) async {
-        // Check memory pressure before starting batch preload
+        // Check memory pressure before starting batch preload with much stricter limit
         let currentMemory = getCurrentMemoryUsage()
-        if currentMemory > 400 * 1024 * 1024 { // 400MB limit for batch operations
+        if currentMemory > 150 * 1024 * 1024 { // Much stricter 150MB limit for batch operations
             logger.warning("Skipping batch preload due to memory pressure: \(self.formatBytes(currentMemory))")
             return
         }
 
-        // Limit batch size based on memory pressure
-        let limitedUrls = Array(urls.prefix(isUnderMemoryPressure ? 1 : min(3, urls.count)))
+        // Much more limited batch size - maximum 1 image at a time
+        let limitedUrls = Array(urls.prefix(1))
 
-        logger.info("Starting conservative batch preload of \(limitedUrls.count) images (from \(urls.count) requested)")
+        logger.info("Starting ultra-conservative batch preload of \(limitedUrls.count) images (from \(urls.count) requested)")
 
         let startTime = CFAbsoluteTimeGetCurrent()
 
         // Process images sequentially to prevent memory spikes
         for url in limitedUrls {
-            // Check memory before each image
+            // Check memory before each image with stricter limit
             let memoryCheck = getCurrentMemoryUsage()
-            if memoryCheck > 600 * 1024 * 1024 { // 600MB absolute limit
+            if memoryCheck > 200 * 1024 * 1024 { // Much stricter 200MB absolute limit
                 logger.warning("Aborting preload due to memory limit: \(self.formatBytes(memoryCheck))")
                 break
             }
@@ -360,8 +352,6 @@ import Combine
 
     /// Performs intelligent cache optimization
     func optimizeCache() async {
-        logger.debug("Starting cache optimization")
-
         // Update memory pressure status
         updateMemoryPressureStatus()
 
@@ -371,8 +361,7 @@ import Combine
             await performSmartEviction()
         }
 
-        // Log cache statistics
-        logCacheStatistics()
+        // Statistics are logged separately by timer
     }
 
     // MARK: - Private Optimization Methods
@@ -481,8 +470,6 @@ import Combine
 
     /// Much more aggressive smart eviction
     private func performSmartEviction() async {
-        logger.debug("Performing smart cache eviction")
-
         // Get all metadata for scoring
         var scoredEntries: [(key: NSString, score: Double)] = []
         for key in cachedImageKeys {
@@ -511,13 +498,14 @@ import Combine
                 removeCachedImage(for: URL(string: key as String)!)
                 currentSize = getActualCacheSize()
                 evictedCount += 1
-                logger.debug("Evicted (\(evictedCount)): \(key.lastPathComponent) (score: \(String(format: "%.2f", score)))")
             } else {
                 break
             }
         }
 
-        logger.debug("Smart eviction completed. Evicted \(evictedCount) images. Size: \(self.formatBytes(currentSize))")
+        if evictedCount > 0 {
+            logger.debug("Cache evicted \(evictedCount) images, size: \(self.formatBytes(currentSize))")
+        }
     }
 
     /// Get more accurate cache size estimation
@@ -595,9 +583,7 @@ import Combine
 
     /// Background cleanup when app is inactive
     private func performBackgroundCleanup() async {
-        logger.debug("Performing background cleanup")
-
-        // Reduce cache limits when app is in background
+        // Reduce cache limits when app is in background (silent operation)
         imageCache.countLimit = max(imageCache.countLimit / 2, 5)
         thumbnailCache.countLimit = max(thumbnailCache.countLimit / 2, 10)
 
@@ -685,7 +671,11 @@ extension ImageCacheService {
     /// Logs detailed cache performance metrics
     func logCacheStatistics() {
         let stats = getCacheStatistics()
-        logger.info("Cache stats - Hit rate: \(String(format: "%.1f", stats.hitRate * 100))%, Size: \(stats.formattedSize), Requests: \(stats.totalRequests), Preloads: \(stats.preloadRequests)")
+
+        // Only log if there's meaningful activity or issues
+        if stats.totalRequests > 0 || stats.isUnderPressure {
+            logger.info("Cache stats - Hit rate: \(String(format: "%.1f", stats.hitRate * 100))%, Size: \(stats.formattedSize), Requests: \(stats.totalRequests), Preloads: \(stats.preloadRequests)")
+        }
 
         // Update performance monitor with cache hit rate
         PerformanceMonitor.shared.updateCacheHitRate(stats.hitRate)
