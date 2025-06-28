@@ -35,6 +35,12 @@ final class SettingsViewModel: ObservableObject {
     /// Whether settings are being saved
     @Published var isSaving: Bool = false
 
+    /// Whether to show a toast notification
+    @Published var showToast: Bool = false
+
+    /// Toast message content
+    @Published var toastMessage: String = ""
+
     // MARK: - Internal State
 
     private let originalSettings: WallpaperSettings
@@ -103,12 +109,11 @@ final class SettingsViewModel: ObservableObject {
 
         guard validationErrors.isEmpty else {
             logger.warning("Cannot save settings - validation errors exist")
-            statusMessage = "Please fix validation errors before saving"
+            showToast(message: "Please fix validation errors before saving")
             return
         }
 
         isSaving = true
-        statusMessage = "Saving settings..."
 
         // Save to UserDefaults
         settings.save()
@@ -118,14 +123,11 @@ final class SettingsViewModel: ObservableObject {
 
         hasUnsavedChanges = false
         isSaving = false
-        statusMessage = "Settings saved successfully"
 
         logger.info("Settings saved successfully")
 
-        // Clear status message after delay
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
-            self.statusMessage = ""
-        }
+        // Show success toast
+        showToast(message: "Settings saved successfully")
     }
 
     /// Discards changes and reverts to original settings
@@ -142,6 +144,17 @@ final class SettingsViewModel: ObservableObject {
         logger.info("Settings changes cancelled")
     }
 
+    /// Shows a toast notification to the user
+    private func showToast(message: String) {
+        toastMessage = message
+        showToast = true
+
+        // Hide toast after 2 seconds
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+            self.showToast = false
+        }
+    }
+
     /// Resets settings to defaults
     func resetToDefaults() {
         logger.info("Resetting settings to defaults")
@@ -149,7 +162,7 @@ final class SettingsViewModel: ObservableObject {
         settings = WallpaperSettings()
         hasUnsavedChanges = true
         validateSettings()
-        statusMessage = "Settings reset to defaults"
+        showToast(message: "Settings reset to defaults")
 
         logger.info("Settings reset to defaults")
     }
@@ -234,7 +247,7 @@ final class SettingsViewModel: ObservableObject {
 private extension SettingsViewModel {
     /// Sets up Combine bindings for reactive updates
     func setupBindings() {
-        // Monitor settings changes
+        // Monitor settings changes to track modifications
         $settings
             .dropFirst() // Skip initial value
             .sink { [weak self] _ in
@@ -251,29 +264,18 @@ private extension SettingsViewModel {
         // Check if we can access the folder
         guard FileManager.default.fileExists(atPath: url.path) else {
             logger.error("Selected folder does not exist: \(url.path)")
-            statusMessage = "Selected folder does not exist"
+            showToast(message: "Selected folder does not exist")
             return
         }
 
-        // Update settings - even if it's the same folder, we want to trigger updates
-        let oldPath = settings.folderPath
+        // Update settings
         settings.folderPath = url
 
-        // Force trigger settings update even if the path is the same
-        if oldPath == url {
-            // Manually trigger the onSettingsSaved callback to ensure UI updates
-            onSettingsSaved?(settings)
-        }
+        // Mark as having unsaved changes
+        hasUnsavedChanges = true
 
-        // Save settings immediately
-        settings.save()
-
-        statusMessage = "Folder selected: \(url.lastPathComponent)"
-
-        // Clear status message after delay
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
-            self.statusMessage = ""
-        }
+        // Show toast notification
+        showToast(message: "Folder selected: \(url.lastPathComponent)")
 
         logger.info("Folder selection completed")
     }
@@ -304,11 +306,6 @@ private extension SettingsViewModel {
 // MARK: - Convenience Properties
 
 extension SettingsViewModel {
-    /// Whether the settings can be saved
-    var canSave: Bool {
-        return hasUnsavedChanges && validationErrors.isEmpty && !isSaving
-    }
-
     /// Whether the settings have any issues
     var hasIssues: Bool {
         return !validationErrors.isEmpty
@@ -414,14 +411,16 @@ extension SettingsViewModel {
             let importedSettings = try JSONDecoder().decode(WallpaperSettings.self, from: data)
 
             settings = importedSettings
-            statusMessage = "Settings imported successfully"
+            hasUnsavedChanges = true
+            validateSettings()
+            showToast(message: "Settings imported successfully")
 
             logger.info("Settings imported from: \(url.path)")
             return true
 
         } catch {
             logger.error("Failed to import settings: \(error.localizedDescription)")
-            statusMessage = "Failed to import settings: \(error.localizedDescription)"
+            showToast(message: "Failed to import settings")
             return false
         }
     }
