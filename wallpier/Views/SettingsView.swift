@@ -14,156 +14,56 @@ struct SettingsView: View {
 
     enum SettingsTab: String, CaseIterable {
         case general = "General"
-        case behavior = "Behavior"
         case display = "Display"
         case system = "System"
         case advanced = "Advanced"
+        case about = "About"
 
         var icon: String {
             switch self {
             case .general: return "gear"
-            case .behavior: return "timer"
             case .display: return "display"
             case .system: return "macwindow"
             case .advanced: return "cpu"
+            case .about: return "info.circle"
             }
         }
     }
 
     var body: some View {
-        HStack(spacing: 0) {
-            // Settings Sidebar
-            VStack(spacing: 0) {
-                // Sidebar Header
-                VStack(spacing: 8) {
-                    Text("Settings")
-                        .font(.title2)
-                        .fontWeight(.semibold)
-                        .frame(maxWidth: .infinity, alignment: .leading)
+        TabView(selection: $selectedTab) {
+            GeneralSettingsView(viewModel: viewModel)
+                .tabItem {
+                    Label("General", systemImage: "gear")
                 }
-                .padding(.horizontal, 16)
-                .padding(.vertical, 20)
-                .background(Color(NSColor.controlBackgroundColor))
+                .tag(SettingsTab.general)
 
-                Divider()
-
-                // Sidebar Content
-                ScrollView {
-                    LazyVStack(spacing: 4) {
-                        ForEach(SettingsTab.allCases, id: \.rawValue) { tab in
-                            Button(action: { selectedTab = tab }) {
-                                HStack(spacing: 12) {
-                                    Image(systemName: tab.icon)
-                                        .font(.system(size: 16, weight: .medium))
-                                        .foregroundColor(selectedTab == tab ? .white : .primary)
-                                        .frame(width: 20)
-
-                                    Text(tab.rawValue)
-                                        .font(.system(size: 14, weight: .medium))
-                                        .foregroundColor(selectedTab == tab ? .white : .primary)
-                                        .frame(maxWidth: .infinity, alignment: .leading)
-
-                                    Spacer()
-                                }
-                                .padding(.horizontal, 16)
-                                .padding(.vertical, 10)
-                                .background(
-                                    RoundedRectangle(cornerRadius: 8)
-                                        .fill(selectedTab == tab ? Color.accentColor : Color.clear)
-                                )
-                                .contentShape(Rectangle())
-                            }
-                            .buttonStyle(.plain)
-                            .padding(.horizontal, 12)
-                        }
-                    }
-                    .padding(.vertical, 12)
+            DisplaySettingsView(viewModel: viewModel)
+                .tabItem {
+                    Label("Display", systemImage: "display")
                 }
+                .tag(SettingsTab.display)
 
-                Spacer()
-
-                // Footer with save/cancel buttons
-                VStack(spacing: 8) {
-                    Divider()
-
-                    VStack(spacing: 8) {
-                        Button("Save") {
-                            viewModel.saveSettings()
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .controlSize(.large)
-                        .disabled(viewModel.isSaving || !viewModel.hasUnsavedChanges || !viewModel.validationErrors.isEmpty)
-
-                        Button("Close") {
-                            viewModel.cancelChanges()
-                            dismiss()
-                        }
-                        .buttonStyle(.bordered)
-                        .controlSize(.large)
-                        .disabled(viewModel.isSaving)
-                        .keyboardShortcut(.cancelAction)
-                    }
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 16)
+            SystemSettingsView(viewModel: viewModel)
+                .tabItem {
+                    Label("System", systemImage: "macwindow")
                 }
-                .background(Color(NSColor.controlBackgroundColor))
-            }
-            .frame(width: 200)
-            .background(Color(NSColor.windowBackgroundColor))
+                .tag(SettingsTab.system)
 
-            Divider()
-
-            // Settings Content
-            VStack(spacing: 0) {
-                // Content Header
-                VStack(spacing: 8) {
-                    HStack {
-                        Label(selectedTab.rawValue, systemImage: selectedTab.icon)
-                            .font(.title2)
-                            .fontWeight(.semibold)
-
-                        Spacer()
-
-                        // Status indicator if there are validation errors
-                        if !viewModel.validationErrors.isEmpty {
-                            Image(systemName: "exclamationmark.triangle.fill")
-                                .foregroundColor(.orange)
-                                .help("Settings have validation errors")
-                        }
-                    }
+            AdvancedSettingsView(viewModel: viewModel)
+                .tabItem {
+                    Label("Advanced", systemImage: "cpu")
                 }
-                .padding(.horizontal, 24)
-                .padding(.vertical, 20)
-                .background(Color(NSColor.controlBackgroundColor))
+                .tag(SettingsTab.advanced)
 
-                Divider()
-
-                // Scrollable Content
-                ScrollView(.vertical, showsIndicators: true) {
-                    VStack(spacing: 0) {
-                        // Content based on selected tab
-                        switch selectedTab {
-                        case .general:
-                            GeneralSettingsView(viewModel: viewModel)
-                        case .behavior:
-                            BehaviorSettingsView(viewModel: viewModel)
-                        case .display:
-                            DisplaySettingsView(viewModel: viewModel)
-                        case .system:
-                            SystemSettingsView(viewModel: viewModel)
-                        case .advanced:
-                            AdvancedSettingsView(viewModel: viewModel)
-                        }
-                    }
-                    .padding(.horizontal, 24)
-                    .padding(.vertical, 20)
+            AboutSettingsView()
+                .tabItem {
+                    Label("About", systemImage: "info.circle")
                 }
-                .background(Color(NSColor.windowBackgroundColor))
-            }
-            .frame(maxWidth: .infinity)
+                .tag(SettingsTab.about)
         }
-        .frame(width: 750, height: 550) // Fixed dimensions
-        .background(Color(NSColor.windowBackgroundColor))
+        .frame(width: 550, height: 400)
+        .padding()
         .overlay(
             // Toast notification overlay
             ToastView(
@@ -171,13 +71,24 @@ struct SettingsView: View {
                 message: viewModel.toastMessage
             )
         )
-        .alert("Validation Errors", isPresented: .constant(!viewModel.validationErrors.isEmpty)) {
-            Button("OK") { }
-        } message: {
-            VStack(alignment: .leading) {
-                ForEach(viewModel.validationErrors, id: \.self) { error in
-                    Text("• \(error)")
+        // Buttons removed as standard Settings windows auto-save or have simple close behavior
+        // Wallpier's SettingsViewModel has explicit save/cancel, providing a "Close" button in toolbar is better
+        // But for now, user wants UI style refactor.
+        // We'll add a Toolbar for the Save/Close actions.
+        .toolbar {
+            ToolbarItem(placement: .cancellationAction) {
+                Button("Close") {
+                    viewModel.cancelChanges()
+                    dismiss()
                 }
+            }
+            ToolbarItem(placement: .confirmationAction) {
+                Button("Save") {
+                    viewModel.saveSettings()
+                    // Optional: dismiss() on save? Usually yes for modal settings.
+                     dismiss()
+                }
+                .disabled(viewModel.validationErrors.isEmpty == false)
             }
         }
     }
@@ -204,330 +115,180 @@ struct GeneralSettingsView: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 32) {
-            // Folder Selection
-            SettingsGroup(title: "Image Folder", icon: "folder") {
-                VStack(alignment: .leading, spacing: 16) {
-                    HStack {
-                        VStack(alignment: .leading, spacing: 6) {
-                            Text("Selected Folder")
-                                .font(.subheadline)
-                                .fontWeight(.medium)
-                            Text(viewModel.folderDisplayName)
-                                .font(.body)
-                                .foregroundColor(.secondary)
-                                .lineLimit(1)
-                                .truncationMode(.middle)
+        Form {
+            Section("Application Behavior") {
+                Toggle(isOn: Binding(
+                    get: { viewModel.settings.systemIntegration?.launchAtStartup ?? false },
+                    set: { enabled in
+                        Task {
+                            let _ = await SystemService().setLaunchAtStartup(enabled)
+                            viewModel.settings.systemIntegration?.launchAtStartup = enabled
                         }
-
-                        Spacer()
-
-                        Button("Choose...") {
-                            viewModel.selectFolder()
-                        }
-                        .buttonStyle(.bordered)
-                        .controlSize(.large)
                     }
-
-                    if let folderPath = viewModel.settings.folderPath {
-                        Text(folderPath.path)
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                            .textSelection(.enabled)
-                            .padding(.vertical, 4)
-                            .padding(.horizontal, 8)
-                            .background(Color(NSColor.controlBackgroundColor))
-                            .cornerRadius(4)
-                    }
-
-                    Toggle("Scan subfolders recursively", isOn: $viewModel.settings.isRecursiveScanEnabled)
-                        .help("Include images from subfolders when scanning")
-                        .toggleStyle(SwitchToggleStyle())
-
-                    // Folder validation
-                    let validation = viewModel.validateFolderPath()
-                    HStack(spacing: 8) {
-                        Image(systemName: validation.isValid ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
-                            .foregroundColor(validation.isValid ? .green : .orange)
-                            .font(.system(size: 14))
-                        Text(validation.info)
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                    }
-                    .padding(.vertical, 8)
-                    .padding(.horizontal, 12)
-                    .background(
-                        RoundedRectangle(cornerRadius: 6)
-                            .fill(validation.isValid ? Color.green.opacity(0.1) : Color.orange.opacity(0.1))
-                    )
+                )) {
+                    Text("Launch at startup")
+                    Text("Automatically start Wallpier when you log in")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
                 }
-            }
+                .accessibilityLabel("Launch at startup")
+                .accessibilityHint("Automatically start Wallpier when you log in")
 
-            // App Behavior
-            SettingsGroup(title: "Application Behavior", icon: "app.badge") {
-                VStack(alignment: .leading, spacing: 16) {
-                    SettingsToggleRow(
-                        title: "Launch at startup",
-                        description: "Automatically start Wallpier when you log in",
-                        isOn: Binding(
-                            get: { viewModel.settings.systemIntegration?.launchAtStartup ?? false },
-                            set: { enabled in
-                                Task {
-                                    let _ = await SystemService().setLaunchAtStartup(enabled)
-                                    viewModel.settings.systemIntegration?.launchAtStartup = enabled
-                                }
-                            }
-                        )
-                    )
+                Toggle(isOn: $viewModel.settings.showMenuBarIcon) {
+                    Text("Show menu bar icon")
+                    Text("Display a menu bar icon for quick access")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+                .accessibilityLabel("Show menu bar icon")
+                .accessibilityHint("Display a menu bar icon for quick access")
 
-                    VStack(alignment: .leading, spacing: 12) {
-                        Text("App Visibility")
-                            .font(.subheadline)
-                            .fontWeight(.medium)
-
-                        VStack(alignment: .leading, spacing: 8) {
-                            let isDockHidden = viewModel.settings.systemIntegration?.hideDockIcon ?? false
-
-                            HStack {
-                                VStack(alignment: .leading, spacing: 4) {
-                                    Text("Current mode:")
-                                        .font(.caption)
-                                    Text(appVisibilityMode)
-                                        .font(.caption)
-                                        .foregroundColor(.secondary)
-                                }
-                                Spacer()
-                            }
-
-                                                        SettingsToggleRow(
-                                title: "Show menu bar icon",
-                                description: "Display a menu bar icon for quick access",
-                                isOn: $viewModel.settings.showMenuBarIcon
-                            )
-
-                            SettingsToggleRow(
-                                title: "Hide dock icon",
-                                description: "Remove app from dock (menu bar only mode)",
-                                isOn: Binding(
-                                    get: { viewModel.settings.systemIntegration?.hideDockIcon ?? false },
-                                    set: { enabled in
-                                        SystemService().configureDockVisibility(!enabled)
-                                        viewModel.settings.systemIntegration?.hideDockIcon = enabled
-                                    }
-                                )
-                            )
-
-                            if isDockHidden {
-                                HStack(spacing: 8) {
-                                    Image(systemName: "info.circle.fill")
-                                        .foregroundColor(.blue)
-                                        .font(.system(size: 12))
-                                    Text("Restart required for dock changes to take full effect")
-                                        .font(.caption2)
-                                        .foregroundColor(.blue)
-                                }
-                                .padding(.horizontal, 8)
-                                .padding(.vertical, 4)
-                                .background(Color.blue.opacity(0.1))
-                                .cornerRadius(4)
-                            }
+                VStack(alignment: .leading, spacing: 8) {
+                    Toggle(isOn: Binding(
+                        get: { viewModel.settings.systemIntegration?.hideDockIcon ?? false },
+                        set: { enabled in
+                            SystemService().configureDockVisibility(!enabled)
+                            viewModel.settings.systemIntegration?.hideDockIcon = enabled
                         }
+                    )) {
+                        Text("Hide dock icon")
+                        Text("Remove app from dock (menu bar only mode)")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+
+                    if viewModel.settings.systemIntegration?.hideDockIcon == true {
+                        Text("Restart required for dock changes to take full effect")
+                            .font(.caption)
+                            .foregroundColor(.blue)
                     }
                 }
             }
 
-            // Status Message
+            Section("Power Management") {
+                Toggle("Pause cycling on battery power", isOn: $viewModel.settings.advancedSettings.pauseOnBattery)
+                    .accessibilityLabel("Pause on battery")
+                    .accessibilityHint("Stop wallpaper cycling when running on battery power")
+                Toggle("Pause cycling in low power mode", isOn: $viewModel.settings.advancedSettings.pauseInLowPowerMode)
+                    .accessibilityLabel("Pause in low power mode")
+                    .accessibilityHint("Stop wallpaper cycling when low power mode is enabled")
+            }
+
             if !viewModel.statusMessage.isEmpty {
-                HStack(spacing: 12) {
-                    Image(systemName: "info.circle.fill")
-                        .foregroundColor(.blue)
-                    Text(viewModel.statusMessage)
-                        .font(.subheadline)
-                }
-                .padding(.horizontal, 16)
-                .padding(.vertical, 12)
-                .background(Color.blue.opacity(0.1))
-                .cornerRadius(8)
-                .overlay(
-                    RoundedRectangle(cornerRadius: 8)
-                        .stroke(Color.blue.opacity(0.3), lineWidth: 1)
-                )
-            }
-
-            Spacer(minLength: 20)
-        }
-    }
-}
-
-// MARK: - Behavior Settings
-
-struct BehaviorSettingsView: View {
-    @ObservedObject var viewModel: SettingsViewModel
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 32) {
-            // Cycling Configuration
-            SettingsGroup(title: "Cycling Behavior", icon: "arrow.clockwise") {
-                VStack(alignment: .leading, spacing: 20) {
-                    // Cycling interval
-                    SettingsPickerRow(
-                        title: "Change wallpaper every:",
-                        description: "How often to automatically change the wallpaper",
-                        selection: $viewModel.settings.cyclingInterval,
-                        options: viewModel.availableIntervals.map { (value: $0.seconds, label: $0.name) }
-                    )
-
-                    Divider()
-                        .padding(.vertical, 4)
-
-                    // Sort and shuffle
-                    VStack(alignment: .leading, spacing: 16) {
-                        SettingsPickerRow(
-                            title: "Image order",
-                            description: "How to sort images in the cycling queue",
-                            selection: $viewModel.settings.sortOrder,
-                            options: ImageSortOrder.allCases.map { (value: $0, label: $0.displayName) }
-                        )
-
-                        SettingsToggleRow(
-                            title: "Shuffle images",
-                            description: "Randomize the order of images",
-                            isOn: $viewModel.settings.isShuffleEnabled
-                        )
+                Section {
+                    HStack {
+                        Image(systemName: "info.circle.fill")
+                            .foregroundColor(.blue)
+                        Text(viewModel.statusMessage)
                     }
                 }
             }
-
-            // Power Management
-            SettingsGroup(title: "Power Management", icon: "battery.100") {
-                VStack(alignment: .leading, spacing: 16) {
-                    SettingsToggleRow(
-                        title: "Pause cycling on battery power",
-                        description: "Stop changing wallpapers when running on battery to save power",
-                        isOn: $viewModel.settings.advancedSettings.pauseOnBattery
-                    )
-
-                    SettingsToggleRow(
-                        title: "Pause cycling in low power mode",
-                        description: "Stop changing wallpapers when macOS low power mode is enabled",
-                        isOn: $viewModel.settings.advancedSettings.pauseInLowPowerMode
-                    )
-                }
-            }
-
-            Spacer(minLength: 20)
         }
+        .formStyle(.grouped)
     }
 }
 
 // MARK: - Display Settings
 
+
 struct DisplaySettingsView: View {
     @ObservedObject var viewModel: SettingsViewModel
+    @State private var useCustomAccentColor: Bool = false
+    @State private var customAccentColor: Color = .blue
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 32) {
-            // Wallpaper Display
-            SettingsGroup(title: "Wallpaper Display", icon: "photo.on.rectangle") {
-                VStack(alignment: .leading, spacing: 16) {
-                    SettingsPickerRow(
-                        title: "Scaling Mode",
-                        description: scalingModeDescription,
-                        selection: $viewModel.settings.scalingMode,
-                        options: WallpaperScalingMode.allCases.map { (value: $0, label: $0.displayName) }
-                    )
-                }
-            }
-
-            // Multi-Monitor Settings
-            SettingsGroup(title: "Multi-Monitor Setup", icon: "rectangle.3.group") {
-                VStack(alignment: .leading, spacing: 16) {
-                    SettingsToggleRow(
-                        title: "Use same wallpaper on all monitors",
-                        description: "Apply the same wallpaper to all connected displays",
-                        isOn: $viewModel.settings.multiMonitorSettings.useSameWallpaperOnAllMonitors
-                    )
-
-                    // Monitor count info
-                    let screenCount = NSScreen.screens.count
-                    HStack(spacing: 8) {
-                        Image(systemName: "display")
-                            .foregroundColor(.accentColor)
-                            .font(.system(size: 14))
-                        Text("\(screenCount) monitor(s) detected")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                    }
-                    .padding(.vertical, 8)
-                    .padding(.horizontal, 12)
-                    .background(Color.accentColor.opacity(0.1))
-                    .cornerRadius(6)
-
-                    // Per-monitor scaling options
-                    if !viewModel.settings.multiMonitorSettings.useSameWallpaperOnAllMonitors {
-                        VStack(alignment: .leading, spacing: 12) {
-                            ForEach(viewModel.availableDisplayNames, id: \.self) { displayName in
-                                HStack {
-                                    Text(displayName)
-                                        .font(.caption)
-                                    Spacer()
-                                    Picker("", selection: Binding(
-                                        get: { viewModel.perMonitorScalingMode(for: displayName) },
-                                        set: { viewModel.setPerMonitorScalingMode($0, for: displayName) }
-                                    )) {
-                                        ForEach(WallpaperScalingMode.allCases, id: \.self) { mode in
-                                            Text(mode.displayName).tag(mode)
-                                        }
-                                    }
-                                    .pickerStyle(.menu)
-                                    .frame(width: 150)
-                                }
-                            }
+        Form {
+            Section("Appearance") {
+                Toggle("Use custom accent color", isOn: $useCustomAccentColor)
+                    .onChange(of: useCustomAccentColor) { _, newValue in
+                        if !newValue {
+                            viewModel.settings.advancedSettings.accentColorHex = nil
+                        } else {
+                            viewModel.settings.advancedSettings.setAccentColor(customAccentColor)
                         }
-                        .padding(.vertical, 8)
                     }
+                    .accessibilityLabel("Use custom accent color")
+                    .accessibilityHint("Enable to use a custom accent color instead of the system color")
+
+                if useCustomAccentColor {
+                    ColorPicker("Accent Color", selection: $customAccentColor, supportsOpacity: false)
+                        .onChange(of: customAccentColor) { _, newColor in
+                            viewModel.settings.advancedSettings.setAccentColor(newColor)
+                        }
+                        .accessibilityLabel("Accent color picker")
+                        .accessibilityHint("Choose your custom accent color")
                 }
-            }
 
-            // File Filters
-            SettingsGroup(title: "Supported File Types", icon: "doc.on.doc") {
-                VStack(alignment: .leading, spacing: 16) {
-                    VStack(alignment: .leading, spacing: 12) {
-                        SettingsToggleRow(
-                            title: "HEIC files",
-                            description: "High Efficiency Image Format (iOS/macOS photos)",
-                            isOn: $viewModel.settings.fileFilters.includeHEICFiles
-                        )
-
-                        SettingsToggleRow(
-                            title: "GIF files",
-                            description: "Animated and static GIF images",
-                            isOn: $viewModel.settings.fileFilters.includeGIFFiles
-                        )
-
-                        SettingsToggleRow(
-                            title: "WebP files",
-                            description: "Modern web image format",
-                            isOn: $viewModel.settings.fileFilters.includeWebPFiles
-                        )
-                    }
-
-                    HStack(spacing: 8) {
-                        Image(systemName: "checkmark.circle.fill")
-                            .foregroundColor(.green)
-                            .font(.system(size: 14))
-                        Text("Always included: JPEG, PNG, BMP, TIFF")
-                            .font(.caption)
+                if !useCustomAccentColor {
+                    HStack {
+                        Image(systemName: "paintbrush")
+                            .foregroundStyle(Color.accentColor)
+                        Text("Using system accent color")
                             .foregroundColor(.secondary)
+                            .font(.caption)
                     }
-                    .padding(.vertical, 8)
-                    .padding(.horizontal, 12)
-                    .background(Color.green.opacity(0.1))
-                    .cornerRadius(6)
                 }
             }
 
-            Spacer(minLength: 20)
+            Section("Wallpaper Display") {
+                Picker("Scaling Mode", selection: $viewModel.settings.scalingMode) {
+                    ForEach(WallpaperScalingMode.allCases, id: \.self) { mode in
+                        Text(mode.displayName).tag(mode)
+                    }
+                }
+                Text(scalingModeDescription)
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+
+            Section("Multi-Monitor Setup") {
+                Toggle("Use same wallpaper on all monitors", isOn: $viewModel.settings.multiMonitorSettings.useSameWallpaperOnAllMonitors)
+
+                HStack {
+                    Image(systemName: "display")
+                        .foregroundStyle(viewModel.settings.advancedSettings.accentColor)
+                    Text("\(NSScreen.screens.count) monitor(s) detected")
+                        .foregroundColor(.secondary)
+                }
+
+                if !viewModel.settings.multiMonitorSettings.useSameWallpaperOnAllMonitors {
+                    ForEach(viewModel.availableDisplayNames, id: \.self) { displayName in
+                        Picker(displayName, selection: Binding(
+                            get: { viewModel.perMonitorScalingMode(for: displayName) },
+                            set: { viewModel.setPerMonitorScalingMode($0, for: displayName) }
+                        )) {
+                             ForEach(WallpaperScalingMode.allCases, id: \.self) { mode in
+                                 Text(mode.displayName).tag(mode)
+                             }
+                        }
+                    }
+                }
+            }
+
+            Section("Supported File Types") {
+                Toggle("HEIC files", isOn: $viewModel.settings.fileFilters.includeHEICFiles)
+                    .accessibilityLabel("Include HEIC files")
+                    .accessibilityHint("Include HEIC format images in wallpaper scanning")
+                Toggle("GIF files", isOn: $viewModel.settings.fileFilters.includeGIFFiles)
+                    .accessibilityLabel("Include GIF files")
+                    .accessibilityHint("Include GIF format images in wallpaper scanning")
+                Toggle("WebP files", isOn: $viewModel.settings.fileFilters.includeWebPFiles)
+                    .accessibilityLabel("Include WebP files")
+                    .accessibilityHint("Include WebP format images in wallpaper scanning")
+
+                Label("Always included: JPEG, PNG, BMP, TIFF", systemImage: "checkmark.circle.fill")
+                    .foregroundColor(.secondary)
+                    .font(.caption)
+            }
+        }
+        .formStyle(.grouped)
+        .onAppear {
+            // Initialize state from settings
+            useCustomAccentColor = viewModel.settings.advancedSettings.accentColorHex != nil
+            if let hex = viewModel.settings.advancedSettings.accentColorHex,
+               let color = Color(hex: hex) {
+                customAccentColor = color
+            }
         }
     }
 
@@ -554,137 +315,56 @@ struct SystemSettingsView: View {
     @EnvironmentObject private var systemService: SystemService
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 32) {
-
-
-            // System Behavior
-            SettingsGroup(title: "System Behavior", icon: "bolt.circle") {
-                VStack(alignment: .leading, spacing: 16) {
-                    SettingsToggleRow(
-                        title: "Pause when screen is locked",
-                        description: "Stop cycling wallpapers when the screen is locked",
-                        isOn: Binding(
-                            get: { viewModel.settings.systemIntegration?.pauseWhenScreenLocked ?? false },
-                            set: { viewModel.settings.systemIntegration?.pauseWhenScreenLocked = $0 }
-                        )
-                    )
-
-                    SettingsToggleRow(
-                        title: "Pause during presentations",
-                        description: "Pause cycling when fullscreen apps or presentations are active",
-                        isOn: Binding(
-                            get: { viewModel.settings.systemIntegration?.pauseDuringPresentations ?? true },
-                            set: { viewModel.settings.systemIntegration?.pauseDuringPresentations = $0 }
-                        )
-                    )
-                }
+        Form {
+            Section("System Behavior") {
+                Toggle("Pause when screen is locked", isOn: Binding(
+                    get: { viewModel.settings.systemIntegration?.pauseWhenScreenLocked ?? false },
+                    set: { viewModel.settings.systemIntegration?.pauseWhenScreenLocked = $0 }
+                ))
+                Toggle("Pause during presentations", isOn: Binding(
+                    get: { viewModel.settings.systemIntegration?.pauseDuringPresentations ?? true },
+                    set: { viewModel.settings.systemIntegration?.pauseDuringPresentations = $0 }
+                ))
             }
 
-            // Permissions & Status
-            SettingsGroup(title: "Permissions & Status", icon: "lock.shield") {
-                VStack(alignment: .leading, spacing: 16) {
+            Section("Permissions & Status") {
+                VStack(alignment: .leading, spacing: 8) {
                     HStack {
-                        VStack(alignment: .leading, spacing: 8) {
-                            Text("File System Access")
-                                .font(.subheadline)
-                                .fontWeight(.medium)
-
-                            HStack(spacing: 8) {
-                                Circle()
-                                    .fill(systemService.permissionStatus.isFullyGranted ? .green : .orange)
-                                    .frame(width: 8, height: 8)
-
-                                Text(permissionStatusText)
-                                    .font(.caption)
-                                    .foregroundColor(.secondary)
-                            }
-
-                            Text("Wallpier only accesses folders you explicitly select")
-                                .font(.caption2)
-                                .foregroundColor(.secondary)
-                                .opacity(0.8)
-                        }
-
+                        Text("File System Access")
                         Spacer()
-
-                        Button("Select Folder") {
-                            Task {
-                                let granted = await systemService.requestPermissions()
-                                if granted {
-                                    // Optionally update the main settings folder path too
-                                    // This is handled by the folder selection in the permission request
-                                }
-                            }
-                        }
-                        .buttonStyle(.bordered)
-                        .controlSize(.large)
+                        Image(systemName: "circle.fill")
+                            .font(.caption2)
+                            .foregroundColor(systemService.permissionStatus.isFullyGranted ? .green : .orange)
+                        Text(permissionStatusText)
+                            .font(.caption)
+                            .foregroundColor(.secondary)
                     }
+                    Text("Wallpier only accesses folders you explicitly select")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
 
-                    Divider()
-                        .padding(.vertical, 4)
-
-                    // System Info
-                    VStack(alignment: .leading, spacing: 12) {
-                        Text("System Information")
-                            .font(.subheadline)
-                            .fontWeight(.medium)
-
-                        let systemInfo = systemService.getSystemInfo()
-
-                        VStack(spacing: 6) {
-                            SystemInfoRow(
-                                label: "macOS:",
-                                value: systemInfo["macOSVersion"] as? String ?? "Unknown"
-                            )
-
-                            SystemInfoRow(
-                                label: "App Version:",
-                                value: systemInfo["appVersion"] as? String ?? "Unknown"
-                            )
-
-                            SystemInfoRow(
-                                label: "App State:",
-                                value: systemInfo["appState"] as? String ?? "Unknown"
-                            )
+                    Button("Select Folder") {
+                        Task {
+                            let _ = await systemService.requestPermissions()
                         }
-                        .padding(.vertical, 8)
-                        .padding(.horizontal, 12)
-                        .background(Color(NSColor.controlBackgroundColor))
-                        .cornerRadius(6)
                     }
                 }
-            }
 
-            Spacer(minLength: 20)
+                let systemInfo = systemService.getSystemInfo()
+                LabeledContent("macOS", value: systemInfo["macOSVersion"] as? String ?? "Unknown")
+                LabeledContent("App Version", value: systemInfo["appVersion"] as? String ?? "Unknown")
+                LabeledContent("App State", value: systemInfo["appState"] as? String ?? "Unknown")
+            }
         }
+        .formStyle(.grouped)
     }
 
     private var permissionStatusText: String {
         switch systemService.permissionStatus {
-        case .granted:
-            return "Ready to access selected folders"
-        case .denied:
-            return "No folder access granted"
-        case .notDetermined:
-            return "Folder access not configured"
-        case .partiallyGranted(_, _):
-            return "Limited folder access"
-        }
-    }
-}
-
-struct SystemInfoRow: View {
-    let label: String
-    let value: String
-
-    var body: some View {
-        HStack {
-            Text(label)
-                .font(.caption)
-            Spacer()
-            Text(value)
-                .font(.caption)
-                .foregroundColor(.secondary)
+        case .granted: return "Ready to access selected folders"
+        case .denied: return "No folder access granted"
+        case .notDetermined: return "Folder access not configured"
+        case .partiallyGranted(_, _): return "Limited folder access"
         }
     }
 }
@@ -695,266 +375,112 @@ struct AdvancedSettingsView: View {
     @ObservedObject var viewModel: SettingsViewModel
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 32) {
-            // Performance Settings
-            SettingsGroup(title: "Performance", icon: "speedometer") {
-                VStack(alignment: .leading, spacing: 16) {
-                    VStack(alignment: .leading, spacing: 12) {
-                        Text("Image Cache")
-                            .font(.subheadline)
-                            .fontWeight(.medium)
-
-                        VStack(spacing: 12) {
-                            HStack {
-                                Text("Maximum cache size:")
-                                    .font(.caption)
-                                Spacer()
-                                HStack(spacing: 4) {
-                                    TextField("MB", value: $viewModel.settings.advancedSettings.maxCacheSizeMB, format: .number)
-                                        .textFieldStyle(.roundedBorder)
-                                        .frame(width: 80)
-                                    Text("MB")
-                                        .font(.caption)
-                                        .foregroundColor(.secondary)
-                                }
-                            }
-
-                            HStack {
-                                Text("Maximum cached images:")
-                                    .font(.caption)
-                                Spacer()
-                                TextField("Count", value: $viewModel.settings.advancedSettings.maxCachedImages, format: .number)
-                                    .textFieldStyle(.roundedBorder)
-                                    .frame(width: 80)
-                            }
-                        }
-
-                        SettingsToggleRow(
-                            title: "Preload next image",
-                            description: "Load the next image in background for smoother transitions",
-                            isOn: $viewModel.settings.advancedSettings.preloadNextImage
-                        )
-                    }
-                }
-            }
-
-            // File Size Filters
-            SettingsGroup(title: "File Size Limits", icon: "doc.text.magnifyingglass") {
-                VStack(alignment: .leading, spacing: 16) {
-                    VStack(spacing: 12) {
-                        HStack {
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text("Minimum file size:")
-                                    .font(.caption)
-                                Text("(0 = no limit)")
-                                    .font(.caption2)
-                                    .foregroundColor(.secondary)
-                            }
-                            Spacer()
-                            HStack(spacing: 4) {
-                                TextField("Bytes", value: $viewModel.settings.fileFilters.minimumFileSize, format: .number)
-                                    .textFieldStyle(.roundedBorder)
-                                    .frame(width: 100)
-                                Text("bytes")
-                                    .font(.caption)
-                                    .foregroundColor(.secondary)
-                            }
-                        }
-
-                        HStack {
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text("Maximum file size:")
-                                    .font(.caption)
-                                Text("(0 = no limit)")
-                                    .font(.caption2)
-                                    .foregroundColor(.secondary)
-                            }
-                            Spacer()
-                            HStack(spacing: 4) {
-                                TextField("Bytes", value: $viewModel.settings.fileFilters.maximumFileSize, format: .number)
-                                    .textFieldStyle(.roundedBorder)
-                                    .frame(width: 100)
-                                Text("bytes")
-                                    .font(.caption)
-                                    .foregroundColor(.secondary)
-                            }
-                        }
-                    }
-                }
-            }
-
-            // Debugging
-            SettingsGroup(title: "Debugging", icon: "ant") {
-                VStack(alignment: .leading, spacing: 12) {
-                    SettingsToggleRow(
-                        title: "Enable detailed logging",
-                        description: "Log detailed information for troubleshooting",
-                        isOn: $viewModel.settings.advancedSettings.enableDetailedLogging
-                    )
-
-                    if viewModel.settings.advancedSettings.enableDetailedLogging {
-                        HStack(spacing: 8) {
-                            Image(systemName: "exclamationmark.triangle.fill")
-                                .foregroundColor(.orange)
-                                .font(.system(size: 14))
-                            Text("Detailed logging may impact performance")
-                                .font(.caption)
-                                .foregroundColor(.orange)
-                        }
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 8)
-                        .background(Color.orange.opacity(0.1))
-                        .cornerRadius(6)
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 6)
-                                .stroke(Color.orange.opacity(0.3), lineWidth: 1)
-                        )
-                    }
-                }
-            }
-
-            // System Recommendations
-            if !viewModel.getSystemRecommendations().isEmpty {
-                SettingsGroup(title: "Recommendations", icon: "lightbulb") {
-                    VStack(alignment: .leading, spacing: 12) {
-                        ForEach(viewModel.getSystemRecommendations(), id: \.self) { recommendation in
-                            HStack(alignment: .top, spacing: 8) {
-                                Image(systemName: "lightbulb.fill")
-                                    .foregroundColor(.yellow)
-                                    .font(.system(size: 14))
-                                Text(recommendation)
-                                    .font(.caption)
-                                    .fixedSize(horizontal: false, vertical: true)
-                            }
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 8)
-                            .background(Color.yellow.opacity(0.1))
-                            .cornerRadius(6)
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 6)
-                                    .stroke(Color.yellow.opacity(0.3), lineWidth: 1)
-                            )
-                        }
-                    }
-                }
-            }
-
-            // Reset Button
-            VStack(spacing: 16) {
-                Divider()
+        Form {
+            Section("Performance") {
+                Text("Image Cache").font(.headline)
 
                 HStack {
+                    Text("Maximum cache size:")
                     Spacer()
-                    Button("Reset to Defaults") {
-                        viewModel.resetToDefaults()
+                    TextField("", value: $viewModel.settings.advancedSettings.maxCacheSizeMB, format: .number)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 100)
+                        .multilineTextAlignment(.trailing)
+                    Text("MB")
+                        .foregroundColor(.secondary)
+                        .frame(width: 50, alignment: .leading)
+                }
+
+                HStack {
+                    Text("Maximum cached images:")
+                    Spacer()
+                    TextField("", value: $viewModel.settings.advancedSettings.maxCachedImages, format: .number)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 100)
+                        .multilineTextAlignment(.trailing)
+                    Text("")
+                        .foregroundColor(.secondary)
+                        .frame(width: 50, alignment: .leading)
+                }
+
+                Toggle("Preload next image", isOn: $viewModel.settings.advancedSettings.preloadNextImage)
+
+                Divider()
+
+                Text("Memory Usage").font(.headline)
+
+                HStack {
+                    Text("Warning threshold:")
+                    Spacer()
+                    TextField("", value: $viewModel.settings.advancedSettings.memoryUsageLimitMB, format: .number)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 100)
+                        .multilineTextAlignment(.trailing)
+                    Text("MB")
+                        .foregroundColor(.secondary)
+                        .frame(width: 50, alignment: .leading)
+                }
+                Text("Set to 0 to disable memory usage warnings. Higher values reduce log spam for large image collections.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+
+            Section("File Size Limits") {
+                HStack {
+                    Text("Minimum file size:")
+                    Spacer()
+                    TextField("", value: $viewModel.settings.fileFilters.minimumFileSize, format: .number)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 100)
+                        .multilineTextAlignment(.trailing)
+                    Text("bytes")
+                        .foregroundColor(.secondary)
+                        .frame(width: 50, alignment: .leading)
+                }
+                HStack {
+                    Text("Maximum file size:")
+                    Spacer()
+                    TextField("", value: $viewModel.settings.fileFilters.maximumFileSize, format: .number)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 100)
+                        .multilineTextAlignment(.trailing)
+                    Text("bytes")
+                        .foregroundColor(.secondary)
+                        .frame(width: 50, alignment: .leading)
+                }
+                Text("Set to 0 for no limit.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+
+            Section("Debugging") {
+                Toggle("Enable detailed logging", isOn: $viewModel.settings.advancedSettings.enableDetailedLogging)
+                if viewModel.settings.advancedSettings.enableDetailedLogging {
+                    Label("Detailed logging may impact performance", systemImage: "exclamationmark.triangle.fill")
+                        .foregroundColor(.orange)
+                }
+            }
+
+            if !viewModel.getSystemRecommendations().isEmpty {
+                Section("Recommendations") {
+                    ForEach(viewModel.getSystemRecommendations(), id: \.self) { recommendation in
+                        Label(recommendation, systemImage: "lightbulb.fill")
+                            .foregroundColor(.yellow)
                     }
-                    .buttonStyle(.bordered)
-                    .controlSize(.large)
                 }
             }
 
-            Spacer(minLength: 20)
-        }
-    }
-}
-
-// MARK: - Helper Views
-
-struct SettingsGroup<Content: View>: View {
-    let title: String
-    let icon: String
-    let content: Content
-
-    init(title: String, icon: String, @ViewBuilder content: () -> Content) {
-        self.title = title
-        self.icon = icon
-        self.content = content()
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            HStack(spacing: 8) {
-                Image(systemName: icon)
-                    .foregroundColor(.accentColor)
-                    .font(.system(size: 16, weight: .medium))
-
-                Text(title)
-                    .font(.headline)
-                    .fontWeight(.semibold)
-            }
-
-            VStack(alignment: .leading, spacing: 12) {
-                content
-            }
-            .padding(.vertical, 16)
-            .padding(.horizontal, 20)
-            .background(
-                RoundedRectangle(cornerRadius: 12)
-                    .fill(Color(NSColor.controlBackgroundColor))
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 12)
-                    .stroke(Color.primary.opacity(0.1), lineWidth: 0.5)
-            )
-        }
-    }
-}
-
-struct SettingsToggleRow: View {
-    let title: String
-    let description: String
-    @Binding var isOn: Bool
-
-    var body: some View {
-        HStack {
-            VStack(alignment: .leading, spacing: 4) {
-                Text(title)
-                    .font(.subheadline)
-                    .fontWeight(.medium)
-
-                Text(description)
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-
-            Spacer()
-
-            Toggle("", isOn: $isOn)
-                .toggleStyle(SwitchToggleStyle())
-        }
-    }
-}
-
-struct SettingsPickerRow<SelectionValue: Hashable>: View {
-    let title: String
-    let description: String
-    @Binding var selection: SelectionValue
-    let options: [(value: SelectionValue, label: String)]
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            VStack(alignment: .leading, spacing: 4) {
-                Text(title)
-                    .font(.subheadline)
-                    .fontWeight(.medium)
-
-                Text(description)
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-
-            Picker(title, selection: $selection) {
-                ForEach(options, id: \.value) { option in
-                    Text(option.label).tag(option.value)
+            Section {
+                Button("Reset to Defaults") {
+                    viewModel.resetToDefaults()
                 }
             }
-            .pickerStyle(.menu)
-            .frame(maxWidth: 300, alignment: .leading)
         }
+        .formStyle(.grouped)
     }
 }
+// Helper views (SettingsGroup, SettingsToggleRow, etc.) removed as they are no longer used.
+
 
 // MARK: - Toast Notification
 
@@ -993,6 +519,78 @@ struct ToastView: View {
         }
         .padding(.bottom, 20)
         .allowsHitTesting(false) // Allow clicks to pass through
+    }
+}
+
+// MARK: - About Settings
+
+struct AboutSettingsView: View {
+    var body: some View {
+        ScrollView {
+            VStack(spacing: 24) {
+                Spacer(minLength: 20)
+
+                // App Icon and Title
+                VStack(spacing: 12) {
+                    Image(systemName: "photo.on.rectangle.angled")
+                        .font(.system(size: 64))
+                        .foregroundStyle(.linearGradient(
+                            colors: [.accentColor, .accentColor.opacity(0.7)],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        ))
+
+                    Text("Wallpier")
+                        .font(.title)
+                        .fontWeight(.bold)
+
+                    Text("Dynamic Wallpaper Cycling for macOS")
+                        .font(.subheadline)
+                        .foregroundColor(.secondary)
+                }
+
+                // App Info
+                VStack(spacing: 8) {
+                    HStack {
+                        Text("Version")
+                            .fontWeight(.medium)
+                        Spacer()
+                        Text(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0.0")
+                            .foregroundColor(.secondary)
+                    }
+
+                    HStack {
+                        Text("Build")
+                            .fontWeight(.medium)
+                        Spacer()
+                        Text(Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "1")
+                            .foregroundColor(.secondary)
+                    }
+
+                    HStack {
+                        Text("Bundle ID")
+                            .fontWeight(.medium)
+                        Spacer()
+                        Text(Bundle.main.bundleIdentifier ?? "com.oxystack.wallpier")
+                            .foregroundColor(.secondary)
+                            .font(.caption)
+                    }
+                }
+                .padding()
+                .background(.regularMaterial)
+                .clipShape(RoundedRectangle(cornerRadius: 10))
+                .frame(maxWidth: 300)
+
+                Spacer(minLength: 20)
+
+                // Copyright
+                Text("© 2025 Oxystack. All rights reserved.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+            .frame(maxWidth: .infinity)
+            .padding()
+        }
     }
 }
 

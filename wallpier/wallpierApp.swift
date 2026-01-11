@@ -34,6 +34,11 @@ struct wallpierApp: App {
         NSApplication.shared.delegate = AppDelegate.shared
     }
 
+    /// Get the current accent color from settings
+    private var appAccentColor: Color {
+        settingsViewModel.settings.advancedSettings.accentColor
+    }
+
     @SceneBuilder
     var body: some Scene {
         // Main Window
@@ -42,7 +47,8 @@ struct wallpierApp: App {
                 .environmentObject(wallpaperViewModel)
                 .environmentObject(settingsViewModel)
                 .environmentObject(systemService)
-                .frame(minWidth: 800, minHeight: 600)
+                .tint(appAccentColor)
+                .frame(minWidth: 950, minHeight: 700)
                 .onReceive(NotificationCenter.default.publisher(for: .openMainWindow)) { _ in
                     showingMainWindow = true
                     // Bring app to front
@@ -64,6 +70,7 @@ struct wallpierApp: App {
                 .sheet(isPresented: $showingSettings) {
                     SettingsView(viewModel: settingsViewModel)
                         .environmentObject(systemService)
+                        .tint(appAccentColor)
                 }
                 .onAppear {
                     // Ensure WallpaperViewModel has the correct settings from app startup

@@ -10,49 +10,8 @@ import AppKit
 import OSLog
 import Combine
 
-/// Errors that can occur when setting wallpapers
-enum WallpaperError: LocalizedError {
-    case permissionDenied
-    case invalidImageFormat
-    case folderNotFound
-    case systemIntegrationFailed
-    case fileNotFound
-    case unsupportedImageType
-    case setWallpaperFailed(Error)
-
-    var errorDescription: String? {
-        switch self {
-        case .permissionDenied:
-            return "Permission denied to set wallpaper. Please grant necessary permissions."
-        case .invalidImageFormat:
-            return "The selected image format is not supported."
-        case .folderNotFound:
-            return "The specified folder could not be found."
-        case .systemIntegrationFailed:
-            return "Failed to integrate with system wallpaper settings."
-        case .fileNotFound:
-            return "The specified image file could not be found."
-        case .unsupportedImageType:
-            return "This image type is not supported for wallpapers."
-        case .setWallpaperFailed(let error):
-            return "Failed to set wallpaper: \(error.localizedDescription)"
-        }
-    }
-}
-
-/// Protocol for wallpaper service operations
-@preconcurrency
-@MainActor
-protocol WallpaperServiceProtocol: Sendable {
-    func setWallpaper(_ imageURL: URL) async throws
-    func setWallpaper(_ imageURL: URL, multiMonitorSettings: MultiMonitorSettings) async throws
-    func setWallpaperForMultipleMonitors(_ imageURLs: [URL], multiMonitorSettings: MultiMonitorSettings) async throws
-    func getCurrentWallpaper() async -> URL?
-    func getCurrentWallpapers() async -> [NSScreen: URL]
-    func getSupportedImageTypes() async -> [String]
-    func setWallpaperForScreen(_ imageURL: URL, screen: NSScreen?) async throws
-    var wallpaperPublisher: AnyPublisher<URL?, Never> { get }
-}
+// Note: WallpaperError is defined in Utilities/Errors.swift as the single source of truth
+// Note: WallpaperServiceProtocol is defined in Utilities/Protocols.swift
 
 /// Service responsible for setting desktop wallpapers
 @MainActor
@@ -191,7 +150,7 @@ protocol WallpaperServiceProtocol: Sendable {
                     continuation.resume()
                 } catch {
                     self.logger.error("Failed to set wallpaper for screen \(targetScreen.localizedName): \(error.localizedDescription)")
-                    continuation.resume(throwing: WallpaperError.setWallpaperFailed(error))
+                    continuation.resume(throwing: WallpaperError.setWallpaperFailed(underlying: error))
                 }
             }
         }

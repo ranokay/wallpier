@@ -9,7 +9,7 @@ import Foundation
 import AppKit
 
 /// Image scaling modes for wallpaper display
-enum WallpaperScalingMode: String, CaseIterable, Codable {
+enum WallpaperScalingMode: String, CaseIterable, Codable, Sendable {
     case fill = "fill"
     case fit = "fit"
     case stretch = "stretch"
@@ -48,7 +48,7 @@ enum WallpaperScalingMode: String, CaseIterable, Codable {
 }
 
 /// Sort order for image cycling
-enum ImageSortOrder: String, CaseIterable, Codable {
+enum ImageSortOrder: String, CaseIterable, Codable, Sendable {
     case alphabetical = "alphabetical"
     case dateModified = "dateModified"
     case dateAdded = "dateAdded"
@@ -72,7 +72,7 @@ enum ImageSortOrder: String, CaseIterable, Codable {
 }
 
 /// Main settings structure for the wallpaper application
-struct WallpaperSettings: Codable {
+struct WallpaperSettings: Codable, Sendable, Equatable {
     /// Current version of settings for migration
     static let currentVersion = 1
     let version: Int
@@ -183,7 +183,7 @@ struct WallpaperSettings: Codable {
 }
 
 /// Multi-monitor specific settings
-struct MultiMonitorSettings: Codable {
+struct MultiMonitorSettings: Codable, Sendable, Equatable {
     /// Whether to use the same wallpaper on all monitors
     var useSameWallpaperOnAllMonitors: Bool
 
@@ -197,7 +197,7 @@ struct MultiMonitorSettings: Codable {
 }
 
 /// File filtering settings
-struct FileFilters: Codable {
+struct FileFilters: Codable, Sendable, Equatable {
     /// Minimum file size in bytes (0 = no limit)
     var minimumFileSize: Int
 
@@ -248,7 +248,7 @@ struct FileFilters: Codable {
 }
 
 /// Advanced application settings
-struct AdvancedSettings: Codable {
+struct AdvancedSettings: Codable, Sendable, Equatable {
     /// Maximum number of images to cache in memory
     var maxCachedImages: Int
 
@@ -267,6 +267,12 @@ struct AdvancedSettings: Codable {
     /// Maximum cache size in MB
     var maxCacheSizeMB: Int
 
+    /// Memory usage warning threshold in MB (0 = disable warnings)
+    var memoryUsageLimitMB: Int
+
+    /// Custom accent color as hex string (nil = system default)
+    var accentColorHex: String?
+
     init() {
         self.maxCachedImages = 10
         self.preloadNextImage = true
@@ -274,11 +280,13 @@ struct AdvancedSettings: Codable {
         self.pauseInLowPowerMode = true
         self.enableDetailedLogging = false
         self.maxCacheSizeMB = 100
+        self.memoryUsageLimitMB = 500 // Default 500MB, more reasonable for image apps
+        self.accentColorHex = nil // Use system accent color by default
     }
 }
 
 /// System integration settings
-struct SystemIntegrationSettings: Codable {
+struct SystemIntegrationSettings: Codable, Sendable, Equatable {
     /// Whether to launch app at system startup
     var launchAtStartup: Bool
 
@@ -424,5 +432,68 @@ extension WallpaperSettings {
         var settings = self
         settings.isCyclingEnabled = enabled
         return settings
+    }
+}
+
+// MARK: - Color Hex Conversion
+
+import SwiftUI
+
+extension Color {
+    /// Initialize Color from a hex string (e.g., "#FF5733" or "FF5733")
+    init?(hex: String) {
+        let hexString = hex.trimmingCharacters(in: CharacterSet.alphanumerics.inverted)
+        var int: UInt64 = 0
+        Scanner(string: hexString).scanHexInt64(&int)
+
+        let r, g, b, a: UInt64
+        switch hexString.count {
+        case 6: // RGB
+            (r, g, b, a) = ((int >> 16) & 0xFF, (int >> 8) & 0xFF, int & 0xFF, 255)
+        case 8: // RGBA
+            (r, g, b, a) = ((int >> 24) & 0xFF, (int >> 16) & 0xFF, (int >> 8) & 0xFF, int & 0xFF)
+        default:
+            return nil
+        }
+
+        self.init(
+            .sRGB,
+            red: Double(r) / 255,
+            green: Double(g) / 255,
+            blue: Double(b) / 255,
+            opacity: Double(a) / 255
+        )
+    }
+
+    /// Convert Color to hex string
+    func toHex() -> String? {
+        guard let components = NSColor(self).usingColorSpace(.sRGB)?.cgColor.components else {
+            return nil
+        }
+
+        let r = components.count > 0 ? components[0] : 0
+        let g = components.count > 1 ? components[1] : 0
+        let b = components.count > 2 ? components[2] : 0
+
+        return String(format: "#%02X%02X%02X", Int(r * 255), Int(g * 255), Int(b * 255))
+    }
+}
+
+extension AdvancedSettings {
+    /// Get the accent color as a SwiftUI Color
+    var accentColor: Color {
+        if let hex = accentColorHex, let color = Color(hex: hex) {
+            return color
+        }
+        return Color.accentColor // System default
+    }
+
+    /// Set the accent color from a SwiftUI Color
+    mutating func setAccentColor(_ color: Color?) {
+        if let color = color {
+            accentColorHex = color.toHex()
+        } else {
+            accentColorHex = nil
+        }
     }
 }

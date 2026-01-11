@@ -8,18 +8,7 @@
 import Foundation
 import OSLog
 
-/// Protocol for file monitoring operations
-protocol FileMonitorServiceProtocol {
-    func startMonitoring(_ url: URL, callback: @escaping () -> Void) throws
-    func stopMonitoring()
-    func isMonitoring() -> Bool
-}
-
-/// Delegate protocol for file monitor events
-protocol FileMonitorDelegate: AnyObject {
-    func fileMonitorDidDetectChanges(_ monitor: FileMonitorService, in directory: URL) async
-    func fileMonitorDidFailWithError(_ monitor: FileMonitorService, error: Error) async
-}
+// Note: FileMonitorServiceProtocol and FileMonitorDelegate are defined in Utilities/Protocols.swift
 
 /// Service responsible for monitoring file system changes
 final class FileMonitorService: NSObject, FileMonitorServiceProtocol {

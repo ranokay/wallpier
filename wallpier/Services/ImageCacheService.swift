@@ -10,19 +10,7 @@ import AppKit
 import OSLog
 import Combine
 
-/// Protocol for image caching operations
-@preconcurrency
-@MainActor
-protocol ImageCacheServiceProtocol: Sendable {
-    func cacheImage(_ image: NSImage, for url: URL) async
-    func getCachedImage(for url: URL) async -> NSImage?
-    func preloadImage(from url: URL) async -> NSImage?
-    func clearCache() async
-    func removeCachedImage(for url: URL) async
-    func getCacheSize() async -> Int
-    func preloadImages(_ urls: [URL], priority: TaskPriority) async
-    func optimizeCache() async
-}
+// Note: ImageCacheServiceProtocol is defined in Utilities/Protocols.swift
 
 /// Service responsible for efficient image caching with performance optimizations
 @MainActor
@@ -133,9 +121,10 @@ protocol ImageCacheServiceProtocol: Sendable {
         imageCache.countLimit = min(20, maxCacheSize / 4) // Much more aggressive limit
         imageCache.evictsObjectsWithDiscardedContent = true
 
-        // Increase thumbnail cache proportion
+        // Thumbnail cache - higher count limit since thumbnails are small (~50KB each)
+        // 300 thumbnails * 50KB = ~15MB which is acceptable for gallery browsing
         thumbnailCache.totalCostLimit = Int(Double(totalCostLimit) * 0.3) // Increased from 20%
-        thumbnailCache.countLimit = 50
+        thumbnailCache.countLimit = 300 // Increased from 50 to support larger galleries
         thumbnailCache.evictsObjectsWithDiscardedContent = true
 
         // Metadata cache
@@ -358,6 +347,105 @@ protocol ImageCacheServiceProtocol: Sendable {
         let estimatedMainCache = min(imageCache.totalCostLimit, maxCacheSize * 1024 * 1024 * 7 / 10)
         let estimatedThumbnailCache = min(thumbnailCache.totalCostLimit, maxCacheSize * 1024 * 1024 * 2 / 10)
         return estimatedMainCache + estimatedThumbnailCache
+    }
+
+    // MARK: - Thumbnail Caching for Gallery
+
+    /// Cache a thumbnail for the gallery view (persists across gallery opens)
+    func cacheThumbnail(_ image: NSImage, for url: URL, size: CGFloat) {
+        let key = thumbnailKey(for: url, size: size)
+        let cost = estimateImageMemorySize(image)
+
+        // Don't cache if under memory pressure
+        guard !isUnderMemoryPressure else {
+            logger.debug("Skipping thumbnail cache due to memory pressure: \(url.lastPathComponent)")
+            return
+        }
+
+        thumbnailCache.setObject(image, forKey: key, cost: cost)
+        logger.debug("Cached gallery thumbnail: \(url.lastPathComponent) (\(self.formatBytes(cost)))")
+    }
+
+    /// Retrieve a cached thumbnail
+    func getCachedThumbnail(for url: URL) -> NSImage? {
+        // Try common thumbnail sizes
+        for size in [150.0, 200.0, 256.0, 400.0] as [CGFloat] {
+            let key = thumbnailKey(for: url, size: size)
+            if let thumbnail = thumbnailCache.object(forKey: key) {
+                logger.debug("Gallery thumbnail cache hit: \(url.lastPathComponent)")
+                return thumbnail
+            }
+        }
+        return nil
+    }
+
+    /// Load or create a thumbnail, using cache if available
+    func loadThumbnail(from url: URL, maxSize: CGFloat) async -> NSImage? {
+        let key = thumbnailKey(for: url, size: maxSize)
+
+        // Check cache first
+        if let cached = thumbnailCache.object(forKey: key) {
+            cacheHits += 1
+            logger.debug("Thumbnail cache hit: \(url.lastPathComponent)")
+            return cached
+        }
+
+        cacheMisses += 1
+
+        // Load and resize on background queue
+        return await withCheckedContinuation { continuation in
+            backgroundQueue.async { [weak self] in
+                guard let self = self else {
+                    continuation.resume(returning: nil)
+                    return
+                }
+
+                guard let originalImage = NSImage(contentsOf: url) else {
+                    continuation.resume(returning: nil)
+                    return
+                }
+
+                let thumbnail = self.createThumbnailSync(from: originalImage, maxSize: maxSize)
+
+                Task { @MainActor in
+                    if let thumbnail = thumbnail {
+                        self.cacheThumbnail(thumbnail, for: url, size: maxSize)
+                    }
+                    continuation.resume(returning: thumbnail)
+                }
+            }
+        }
+    }
+
+    /// Create a thumbnail key with size for cache differentiation
+    private func thumbnailKey(for url: URL, size: CGFloat) -> NSString {
+        return "\(url.absoluteString)_thumb_\(Int(size))" as NSString
+    }
+
+    /// Synchronous thumbnail creation for background queue
+    private func createThumbnailSync(from image: NSImage, maxSize: CGFloat) -> NSImage? {
+        let originalSize = image.size
+
+        // If image is already smaller than max size, return original
+        if originalSize.width <= maxSize && originalSize.height <= maxSize {
+            return image
+        }
+
+        // Calculate scale factor to fit within maxSize
+        let scale = min(maxSize / originalSize.width, maxSize / originalSize.height)
+        let newSize = NSSize(width: originalSize.width * scale, height: originalSize.height * scale)
+
+        // Create new image with optimized size
+        let newImage = NSImage(size: newSize)
+        newImage.lockFocus()
+        NSGraphicsContext.current?.imageInterpolation = .high
+        image.draw(in: NSRect(origin: .zero, size: newSize),
+                  from: NSRect(origin: .zero, size: originalSize),
+                  operation: .copy,
+                  fraction: 1.0)
+        newImage.unlockFocus()
+
+        return newImage
     }
 
     /// Performs intelligent cache optimization

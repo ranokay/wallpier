@@ -10,6 +10,8 @@ import Combine
 import OSLog
 import AppKit
 
+// Note: ScreenID and makeScreenID are defined in Utilities/DisplayIdentifiers.swift
+
 /// Main view model coordinating wallpaper cycling operations with performance optimizations
 @MainActor
 final class WallpaperViewModel: ObservableObject {
@@ -22,12 +24,15 @@ final class WallpaperViewModel: ObservableObject {
     private let imageCache: ImageCacheService
     private let fileMonitor: FileMonitorService
 
+    /// Public access to cache service for thumbnail caching in gallery
+    var cacheService: ImageCacheService { imageCache }
+
     // MARK: - Published State
 
     @Published var isRunning = false
     @Published var foundImages: [ImageFile] = []
     @Published var currentImage: ImageFile?
-    @Published var currentImages: [NSScreen: ImageFile] = [:] // For multi-monitor support
+    @Published var currentImages: [ScreenID: ImageFile] = [:] // For multi-monitor support
     @Published var isScanning = false
     @Published var statusMessage = ""
     @Published var hasError = false
@@ -36,7 +41,7 @@ final class WallpaperViewModel: ObservableObject {
     @Published var scanProgress = 0
     @Published var timeUntilNextChange: TimeInterval = 0
     @Published var cycleProgress: Double = 0.0
-    @Published var availableScreens: [(screen: NSScreen, displayName: String)] = []
+    @Published var availableScreens: [(id: ScreenID, screen: NSScreen, displayName: String)] = []
 
     // MARK: - Settings Integration
 
@@ -49,8 +54,8 @@ final class WallpaperViewModel: ObservableObject {
     // MARK: - Performance Optimizations
 
     private var cancellables = Set<AnyCancellable>()
-    private var cycleTimer: Timer?
-    private var countdownTimer: Timer?
+    private var cycleTask: Task<Void, Never>?
+    private var countdownTask: Task<Void, Never>?
     private var idleCleanupTimer: Timer?
     private var cycleConfiguration = CycleConfiguration()
 
@@ -59,7 +64,7 @@ final class WallpaperViewModel: ObservableObject {
     private let wallpaperQueue = DispatchQueue(label: "com.oxystack.wallpier.wallpaper", qos: .userInitiated)
 
     // Multi-monitor cycling state
-    private var screenCycleIndices: [NSScreen: Int] = [:]
+    private var screenCycleController = ScreenCycleController()
 
     // Performance monitoring
     private var lastWallpaperChangeTime = Date()
@@ -85,6 +90,9 @@ final class WallpaperViewModel: ObservableObject {
     private let scanThrottleInterval: TimeInterval = 2.0 // Min 2 seconds between scans of same folder
     private var hasCompletedInitialScan = false // Track if we've done the initial scan
 
+    // Cancellable scan task
+    private var scanTask: Task<Void, Never>?
+
     // MARK: - Initialization
 
     init(wallpaperService: WallpaperServiceProtocol? = nil,
@@ -99,6 +107,7 @@ final class WallpaperViewModel: ObservableObject {
 
         setupFileMonitoring()
         setupBindings()
+        setupMemoryPressureHandler()
         loadSavedState()
         loadAvailableScreens()
         startIdleMemoryCleanup()
@@ -108,22 +117,54 @@ final class WallpaperViewModel: ObservableObject {
 
     deinit {
         // Perform synchronous cleanup only - can't call async methods in deinit
-        cycleTimer?.invalidate()
-        countdownTimer?.invalidate()
+        cycleTask?.cancel()
+        countdownTask?.cancel()
         idleCleanupTimer?.invalidate()
         fileMonitor.stopMonitoring()
         preloadingTask?.cancel()
+        scanTask?.cancel()
         cancellables.removeAll()
+    }
+
+    // MARK: - Memory Pressure Handling
+
+    /// Sets up handler for memory pressure notifications
+    private func setupMemoryPressureHandler() {
+        NotificationCenter.default.publisher(for: .memoryPressureDetected)
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in
+                Task { @MainActor in
+                    await self?.handleMemoryPressure()
+                }
+            }
+            .store(in: &cancellables)
+    }
+
+    /// Handle memory pressure by clearing caches
+    private func handleMemoryPressure() async {
+        logger.warning("Handling memory pressure - clearing caches")
+
+        // Clear image cache (synchronous on MainActor)
+        imageCache.clearCache()
+
+        // Cancel any preloading
+        preloadingTask?.cancel()
+        preloadingTask = nil
+
+        // Optimize cache for memory efficiency
+        await imageCache.optimizeCache()
+
+        logger.info("Memory cleanup completed")
     }
 
     // MARK: - Public Interface
 
-            /// Loads initial data asynchronously
+    /// Loads initial data asynchronously
     func loadInitialData() async {
         logger.info("Loading initial data")
 
         guard let folderPath = settings.folderPath else {
-            logger.info("No folder path in settings - showing folder selection prompt")
+            logger.info("No folder selected")
             updateStatus("No folder selected")
             return
         }
@@ -134,7 +175,7 @@ final class WallpaperViewModel: ObservableObject {
         // Only scan if we don't have images yet (avoid duplicate scans from updateSettings)
         if foundImages.isEmpty && !isScanning {
             logger.info("No images found yet, initiating folder scan")
-            await scanFolder(folderPath, showProgress: false)
+            startScan(folderPath, showProgress: false)
         } else {
             logger.info("Images already loaded (\(self.foundImages.count) images) or scan in progress, skipping scan")
         }
@@ -195,7 +236,7 @@ final class WallpaperViewModel: ObservableObject {
         timeUntilNextChange = 0
 
         // Clear screen cycle indices to ensure fresh start next time
-        screenCycleIndices.removeAll()
+        screenCycleController.clear()
 
         // Aggressively clean cache when stopping to reduce memory usage in standby
         Task {
@@ -223,7 +264,7 @@ final class WallpaperViewModel: ObservableObject {
 
             await MainActor.run {
                 // Update the specific screen's image
-                currentImages[screen] = imageFile
+                currentImages[makeScreenID(for: screen)] = imageFile
 
                 // Update main current image if this is the main screen
                 if screen == NSScreen.main {
@@ -233,7 +274,8 @@ final class WallpaperViewModel: ObservableObject {
                 hasError = false
                 updateChangeTimeStatistics(elapsed)
 
-                let screenName = availableScreens.first { $0.screen == screen }?.displayName ?? "Screen"
+                let sid = makeScreenID(for: screen)
+                let screenName = availableScreens.first { $0.id == sid }?.displayName ?? "Screen"
                 let message = "Set wallpaper on \(screenName): \(imageFile.name)"
                 updateStatus(message)
 
@@ -243,9 +285,9 @@ final class WallpaperViewModel: ObservableObject {
         } catch {
             await MainActor.run {
                 hasError = true
-                errorMessage = error.localizedDescription
-                updateStatus("Failed to set wallpaper: \(error.localizedDescription)")
-
+                let wrapped = WallpaperError.setWallpaperFailed(underlying: error)
+                errorMessage = wrapped.localizedDescription
+                updateStatus(wrapped.localizedDescription)
                 logger.error("Failed to set wallpaper for screen: \(error.localizedDescription)")
             }
         }
@@ -272,9 +314,8 @@ final class WallpaperViewModel: ObservableObject {
 
     /// Rescans current folder
     func rescanCurrentFolder() {
-        Task {
-            guard let folderPath = selectedFolderPath else { return }
-            await scanFolder(folderPath, showProgress: true)
+        if let folderPath = selectedFolderPath {
+            startScan(folderPath, showProgress: true)
         }
     }
 
@@ -294,9 +335,7 @@ final class WallpaperViewModel: ObservableObject {
 
             if let folderPath = newSettings.folderPath {
                 // Always scan when folder actually changes
-                Task {
-                    await scanFolder(folderPath, showProgress: true)
-                }
+                startScan(folderPath, showProgress: true)
             } else {
                 // Clear current state if no folder is selected
                 foundImages = []
@@ -312,9 +351,7 @@ final class WallpaperViewModel: ObservableObject {
             if foundImages.isEmpty && !isScanning {
                 // Check if folder is accessible before scanning
                 if FileManager.default.fileExists(atPath: folderPath.path) {
-                    Task {
-                        await scanFolder(folderPath, showProgress: false)
-                    }
+                    startScan(folderPath, showProgress: false)
                 } else {
                     logger.warning("Skipping scan - folder not accessible: \(folderPath.path)")
                     updateStatus("Selected folder is not accessible")
@@ -355,9 +392,26 @@ final class WallpaperViewModel: ObservableObject {
                 setupInitialMultiMonitorPreview()
             }
         }
+
+        // Apply memory limit changes
+        PerformanceMonitor.shared.updateMemoryLimit(newSettings.advancedSettings.memoryUsageLimitMB)
     }
 
     // MARK: - Private Implementation
+
+    /// Starts a cancellable, debounced scan for the given folder
+    private func startScan(_ folderPath: URL, showProgress: Bool) {
+        // Cancel any in-flight scan
+        scanTask?.cancel()
+
+        // Debounce rapid triggers: small delay before starting
+        scanTask = Task { [weak self] in
+            guard let self else { return }
+            // Small debounce window to coalesce changes
+            try? await Task.sleep(nanoseconds: 300_000_000) // 300ms
+            await self.scanFolder(folderPath, showProgress: showProgress)
+        }
+    }
 
     /// Sets up file monitoring for automatic rescanning
     private func setupFileMonitoring() {
@@ -366,9 +420,11 @@ final class WallpaperViewModel: ObservableObject {
 
     /// Sets up Combine bindings for reactive updates
     private func setupBindings() {
-        // Monitor settings changes
+        // Monitor settings changes - only save if settings actually changed
         $settings
             .dropFirst()
+            .removeDuplicates()
+            .debounce(for: .milliseconds(500), scheduler: RunLoop.main)
             .sink { [weak self] newSettings in
                 newSettings.save()
                 self?.logger.debug("Settings saved automatically")
@@ -390,7 +446,11 @@ final class WallpaperViewModel: ObservableObject {
     /// Loads available screens for multi-monitor support
     private func loadAvailableScreens() {
         if let wallpaperService = wallpaperService as? WallpaperService {
-            self.availableScreens = wallpaperService.getScreensInfo()
+            let info = wallpaperService.getScreensInfo()
+            self.availableScreens = info.map { tuple in
+                let id = makeScreenID(for: tuple.screen)
+                return (id: id, screen: tuple.screen, displayName: tuple.displayName)
+            }
             logger.info("Loaded \(self.availableScreens.count) available screen(s)")
         }
     }
@@ -420,7 +480,7 @@ final class WallpaperViewModel: ObservableObject {
     ///   - showProgress: Indicates whether to display scan progress.
     ///
     /// Uses an optimized scanning strategy based on folder size and settings, updates the list of found images, resets per-screen cycle indices, and initiates image preloading if images are found. Updates scanning state and error messages as appropriate.
-        private func scanFolder(_ folderPath: URL, showProgress: Bool) async {
+    private func scanFolder(_ folderPath: URL, showProgress: Bool) async {
         // Throttle redundant scans of the same folder, BUT allow initial scan on app startup
         let currentPath = folderPath.path
         let timeSinceLastScan = Date().timeIntervalSince(lastScanTime)
@@ -477,7 +537,7 @@ final class WallpaperViewModel: ObservableObject {
                 isScanning = false
 
                 // Clear screen cycle indices since we have a new image list
-                screenCycleIndices.removeAll()
+                screenCycleController.clear()
 
                 // Set up cycle configuration with new images
                 if !images.isEmpty {
@@ -518,9 +578,9 @@ final class WallpaperViewModel: ObservableObject {
             await MainActor.run {
                 isScanning = false
                 hasError = true
-                errorMessage = error.localizedDescription
-                updateStatus("Scan failed: \(error.localizedDescription)")
-
+                let wrapped = ScanError.underlying(error)
+                errorMessage = wrapped.localizedDescription
+                updateStatus("Scan failed: \(wrapped.localizedDescription)")
                 logger.error("Folder scan failed: \(error.localizedDescription)")
             }
         }
@@ -552,12 +612,19 @@ final class WallpaperViewModel: ObservableObject {
 
     /// Performs ultra-conservative preloading based on cycle position and memory pressure
     private func performIntelligentPreloading() async {
-        // Check memory pressure first with stricter limit
+        // Check memory pressure - use 80% of configured limit, or skip if limit is 0 (disabled)
+        let memoryLimitMB = settings.advancedSettings.memoryUsageLimitMB
         let memoryUsage = getCurrentMemoryUsage()
-        guard memoryUsage < 150 * 1024 * 1024 else { // Much stricter 150MB limit
-            logger.warning("Skipping preload due to memory pressure: \(self.formatBytes(memoryUsage))")
-            return
+
+        // If memory limit is set, check against 80% of it for preloading headroom
+        if memoryLimitMB > 0 {
+            let preloadThreshold = Int(Double(memoryLimitMB) * 0.8) * 1024 * 1024
+            guard memoryUsage < preloadThreshold else {
+                logger.debug("Skipping preload due to memory pressure: \(self.formatBytes(memoryUsage)) (threshold: \(memoryLimitMB * 80 / 100)MB)")
+                return
+            }
         }
+        // If limit is 0 (disabled), always allow preloading
 
         // Only preload if actively cycling
         guard isRunning else {
@@ -577,7 +644,7 @@ final class WallpaperViewModel: ObservableObject {
         guard !urlsToPreload.isEmpty else { return }
 
         await imageCache.preloadImages(urlsToPreload, priority: .utility)
-        logger.debug("Ultra-conservatively preloaded \(urlsToPreload.count) image")
+        logger.debug("Preloaded \(urlsToPreload.count) image")
     }
 
     /// Gets current app memory usage
@@ -620,25 +687,16 @@ final class WallpaperViewModel: ObservableObject {
         } else {
             // Set different wallpapers for each monitor from the start
             let screens = NSScreen.screens
+            screenCycleController.reset(for: screens, imageCount: foundImages.count, shuffle: settings.isShuffleEnabled)
+
             var imageURLs: [URL] = []
-            var initialImages: [NSScreen: ImageFile] = [:]
+            var initialImages: [ScreenID: ImageFile] = [:]
 
-            // Initialize screen cycle indices with proper starting points
-            screenCycleIndices.removeAll()
-
-            for (screenIndex, screen) in screens.enumerated() {
-                let startIndex: Int
-                if settings.isShuffleEnabled {
-                    // Random starting point for each screen
-                    startIndex = Int.random(in: 0..<foundImages.count)
-                } else {
-                    // Staggered starting points for each screen
-                    startIndex = screenIndex % foundImages.count
-                }
-
-                screenCycleIndices[screen] = startIndex
+            for screen in screens {
+                let sid = makeScreenID(for: screen)
+                let startIndex = screenCycleController.currentIndex(for: screen) ?? 0
                 let imageFile = foundImages[startIndex]
-                initialImages[screen] = imageFile
+                initialImages[sid] = imageFile
                 imageURLs.append(imageFile.url)
             }
 
@@ -696,7 +754,7 @@ final class WallpaperViewModel: ObservableObject {
 
         let screens = NSScreen.screens
         var imageURLs: [URL] = []
-        var nextImages: [NSScreen: ImageFile] = [:]
+        var nextImages: [ScreenID: ImageFile] = [:]
 
         if settings.multiMonitorSettings.useSameWallpaperOnAllMonitors {
             // Use same wallpaper on all monitors - advance from current image
@@ -706,7 +764,8 @@ final class WallpaperViewModel: ObservableObject {
             }
 
             for screen in screens {
-                nextImages[screen] = nextImage
+                let sid = makeScreenID(for: screen)
+                nextImages[sid] = nextImage
                 imageURLs.append(nextImage.url)
             }
         } else {
@@ -723,36 +782,20 @@ final class WallpaperViewModel: ObservableObject {
     ///   - imageURLs: An array to be appended with the URLs of the next images for all screens.
     ///
     /// Initializes per-screen cycling indices if not already set, then advances each screen to its next image based on its own index. Shuffle or staggered starting points are used depending on settings.
-    private func setNextWallpaperIndependentMonitors(_ nextImages: inout [NSScreen: ImageFile], _ imageURLs: inout [URL]) async {
+    private func setNextWallpaperIndependentMonitors(_ nextImages: inout [ScreenID: ImageFile], _ imageURLs: inout [URL]) async {
         let screens = NSScreen.screens
 
         // Create or maintain separate cycling indices for each screen
-        if screenCycleIndices.isEmpty {
-            // Initialize indices for each screen with different starting points
-            for (index, screen) in screens.enumerated() {
-                let startIndex: Int
-                if settings.isShuffleEnabled {
-                    // Random starting point for each screen
-                    startIndex = Int.random(in: 0..<foundImages.count)
-                } else {
-                    // Staggered starting points for each screen
-                    startIndex = index % foundImages.count
-                }
-                screenCycleIndices[screen] = startIndex
-            }
-        }
+        screenCycleController.ensureInitialized(for: screens, imageCount: foundImages.count, shuffle: settings.isShuffleEnabled)
 
         // Advance each screen's index independently
         for screen in screens {
-            var currentScreenIndex = screenCycleIndices[screen] ?? 0
-
-            // Advance to next image for this specific screen
-            currentScreenIndex = (currentScreenIndex + 1) % foundImages.count
-            screenCycleIndices[screen] = currentScreenIndex
-
-            let nextImage = foundImages[currentScreenIndex]
-            nextImages[screen] = nextImage
-            imageURLs.append(nextImage.url)
+            if let nextIndex = screenCycleController.advance(for: screen, imageCount: foundImages.count) {
+                let nextImage = foundImages[nextIndex]
+                let sid = makeScreenID(for: screen)
+                nextImages[sid] = nextImage
+                imageURLs.append(nextImage.url)
+            }
         }
     }
 
@@ -765,7 +808,7 @@ final class WallpaperViewModel: ObservableObject {
 
         let screens = NSScreen.screens
         var imageURLs: [URL] = []
-        var prevImages: [NSScreen: ImageFile] = [:]
+        var prevImages: [ScreenID: ImageFile] = [:]
 
         if settings.multiMonitorSettings.useSameWallpaperOnAllMonitors {
             // Use same wallpaper on all monitors - go back from current image
@@ -775,7 +818,8 @@ final class WallpaperViewModel: ObservableObject {
             }
 
             for screen in screens {
-                prevImages[screen] = prevImage
+                let sid = makeScreenID(for: screen)
+                prevImages[sid] = prevImage
                 imageURLs.append(prevImage.url)
             }
         } else {
@@ -790,41 +834,25 @@ final class WallpaperViewModel: ObservableObject {
     /// - Parameters:
     ///   - prevImages: A dictionary to be updated with the previous image for each screen.
     ///   - imageURLs: An array to be updated with the URLs of the previous images for all screens.
-    private func setPreviousWallpaperIndependentMonitors(_ prevImages: inout [NSScreen: ImageFile], _ imageURLs: inout [URL]) async {
+    private func setPreviousWallpaperIndependentMonitors(_ prevImages: inout [ScreenID: ImageFile], _ imageURLs: inout [URL]) async {
         let screens = NSScreen.screens
 
         // Ensure indices are initialized
-        if screenCycleIndices.isEmpty {
-            // Initialize indices for each screen with different starting points
-            for (index, screen) in screens.enumerated() {
-                let startIndex: Int
-                if settings.isShuffleEnabled {
-                    // Random starting point for each screen
-                    startIndex = Int.random(in: 0..<foundImages.count)
-                } else {
-                    // Staggered starting points for each screen
-                    startIndex = index % foundImages.count
-                }
-                screenCycleIndices[screen] = startIndex
-            }
-        }
+        screenCycleController.ensureInitialized(for: screens, imageCount: foundImages.count, shuffle: settings.isShuffleEnabled)
 
         // Go back on each screen's index independently
         for screen in screens {
-            var currentScreenIndex = screenCycleIndices[screen] ?? 0
-
-            // Go back to previous image for this specific screen
-            currentScreenIndex = currentScreenIndex == 0 ? foundImages.count - 1 : currentScreenIndex - 1
-            screenCycleIndices[screen] = currentScreenIndex
-
-            let prevImage = foundImages[currentScreenIndex]
-            prevImages[screen] = prevImage
-            imageURLs.append(prevImage.url)
+            if let prevIndex = screenCycleController.goBack(for: screen, imageCount: foundImages.count) {
+                let prevImage = foundImages[prevIndex]
+                let sid = makeScreenID(for: screen)
+                prevImages[sid] = prevImage
+                imageURLs.append(prevImage.url)
+            }
         }
     }
 
-        /// Sets multiple wallpapers for multi-monitor setup
-    private func setMultipleWallpapers(_ imageURLs: [URL], newImages: [NSScreen: ImageFile]) async {
+    /// Sets multiple wallpapers for multi-monitor setup
+    private func setMultipleWallpapers(_ imageURLs: [URL], newImages: [ScreenID: ImageFile]) async {
         let startTime = CFAbsoluteTimeGetCurrent()
 
         do {
@@ -841,9 +869,11 @@ final class WallpaperViewModel: ObservableObject {
                 currentImages = newImages
 
                 // Update current image to the first screen's image for compatibility
-                if let firstScreen = NSScreen.screens.first,
-                   let firstImage = newImages[firstScreen] {
-                    currentImage = firstImage
+                if let firstScreen = NSScreen.screens.first {
+                    let sid = makeScreenID(for: firstScreen)
+                    if let firstImage = newImages[sid] {
+                        currentImage = firstImage
+                    }
                 }
 
                 hasError = false
@@ -858,9 +888,9 @@ final class WallpaperViewModel: ObservableObject {
         } catch {
             await MainActor.run {
                 hasError = true
-                errorMessage = error.localizedDescription
-                updateStatus("Failed to set wallpapers: \(error.localizedDescription)")
-
+                let wrapped = WallpaperError.setWallpaperFailed(underlying: error)
+                errorMessage = wrapped.localizedDescription
+                updateStatus(wrapped.localizedDescription)
                 logger.error("Failed to set multi-monitor wallpapers: \(error.localizedDescription)")
             }
         }
@@ -885,12 +915,12 @@ final class WallpaperViewModel: ObservableObject {
                 // Update all screens with same image if using same wallpaper mode
                 if settings.multiMonitorSettings.useSameWallpaperOnAllMonitors {
                     for screen in NSScreen.screens {
-                        currentImages[screen] = imageFile
+                        currentImages[makeScreenID(for: screen)] = imageFile
                     }
                 } else {
                     // Only update the main screen
                     if let mainScreen = NSScreen.main {
-                        currentImages[mainScreen] = imageFile
+                        currentImages[makeScreenID(for: mainScreen)] = imageFile
                     }
                 }
 
@@ -907,9 +937,9 @@ final class WallpaperViewModel: ObservableObject {
         } catch {
             await MainActor.run {
                 hasError = true
-                errorMessage = error.localizedDescription
-                updateStatus("Failed to set wallpaper: \(error.localizedDescription)")
-
+                let wrapped = WallpaperError.setWallpaperFailed(underlying: error)
+                errorMessage = wrapped.localizedDescription
+                updateStatus(wrapped.localizedDescription)
                 logger.error("Failed to set wallpaper: \(error.localizedDescription)")
             }
         }
@@ -927,7 +957,7 @@ final class WallpaperViewModel: ObservableObject {
         }
     }
 
-    /// Starts cycling timer with performance optimization
+    /// Starts cycling task with performance optimization
     private func startCycleTimer() {
         stopCycleTimer()
 
@@ -939,51 +969,53 @@ final class WallpaperViewModel: ObservableObject {
             return startCycleTimer() // Retry with valid interval
         }
 
-        cycleTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
-            Task { @MainActor in
-                await self?.setNextWallpaper()
+        cycleTask = Task { [weak self] in
+            guard let self else { return }
+            // Immediately schedule the countdown for UI
+            await MainActor.run { self.timeUntilNextChange = interval }
+            startCountdownTimer()
+            while !Task.isCancelled {
+                do {
+                    try await Task.sleep(nanoseconds: UInt64(interval * 1_000_000_000))
+                } catch { break }
+                await self.setNextWallpaper()
+                await MainActor.run { self.timeUntilNextChange = interval }
             }
         }
 
-        timeUntilNextChange = interval
-        startCountdownTimer()
-
-        logger.debug("Cycle timer started with interval: \(interval)s")
+        logger.debug("Cycle task started with interval: \(interval)s")
     }
 
-    /// Starts countdown timer for UI updates
+    /// Starts countdown task for UI updates
     private func startCountdownTimer() {
         stopCountdownTimer()
 
-        countdownTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
-            Task { @MainActor in
-                self?.updateCountdown()
+        countdownTask = Task { [weak self] in
+            guard let self else { return }
+            while !Task.isCancelled {
+                do { try await Task.sleep(nanoseconds: 1_000_000_000) } catch { break }
+                await MainActor.run {
+                    guard self.isRunning else { return }
+                    self.timeUntilNextChange = max(0, self.timeUntilNextChange - 1)
+                    if self.timeUntilNextChange <= 0 {
+                        self.timeUntilNextChange = self.settings.cyclingInterval
+                    }
+                }
             }
         }
     }
 
-    /// Updates countdown display
-    private func updateCountdown() {
-        guard isRunning else { return }
-
-        timeUntilNextChange = max(0, timeUntilNextChange - 1)
-
-        if timeUntilNextChange <= 0 {
-            timeUntilNextChange = settings.cyclingInterval
-        }
-    }
-
-    /// Stops cycling timer
+    /// Stops cycling task
     private func stopCycleTimer() {
-        cycleTimer?.invalidate()
-        cycleTimer = nil
+        cycleTask?.cancel()
+        cycleTask = nil
         stopCountdownTimer()
     }
 
-    /// Stops countdown timer
+    /// Stops countdown task
     private func stopCountdownTimer() {
-        countdownTimer?.invalidate()
-        countdownTimer = nil
+        countdownTask?.cancel()
+        countdownTask = nil
     }
 
     /// Restarts cycle timer with new interval
@@ -1034,7 +1066,7 @@ final class WallpaperViewModel: ObservableObject {
             try fileMonitor.startMonitoring(folderPath) { [weak self] in
                 Task { @MainActor in
                     self?.logger.info("Folder changes detected, rescanning...")
-                    await self?.scanFolder(folderPath, showProgress: false)
+                    self?.startScan(folderPath, showProgress: false)
                 }
             }
             logger.info("Started monitoring folder: \(folderPath.path)")
@@ -1074,28 +1106,18 @@ final class WallpaperViewModel: ObservableObject {
             // Use the same first image for all screens in preview
             if let firstImage = cycleConfiguration.currentImage {
                 for screen in screens {
-                    currentImages[screen] = firstImage
+                    let sid = makeScreenID(for: screen)
+                    currentImages[sid] = firstImage
                 }
             }
         } else {
-            // Set up different images for each screen for preview
-            var initialImages: [NSScreen: ImageFile] = [:]
+            screenCycleController.reset(for: screens, imageCount: foundImages.count, shuffle: settings.isShuffleEnabled)
+            var initialImages: [ScreenID: ImageFile] = [:]
 
-            // Initialize screen cycle indices
-            screenCycleIndices.removeAll()
-
-            for (screenIndex, screen) in screens.enumerated() {
-                let startIndex: Int
-                if settings.isShuffleEnabled {
-                    // Random starting point for each screen
-                    startIndex = Int.random(in: 0..<foundImages.count)
-                } else {
-                    // Staggered starting points for each screen
-                    startIndex = screenIndex % foundImages.count
-                }
-
-                screenCycleIndices[screen] = startIndex
-                initialImages[screen] = foundImages[startIndex]
+            for screen in screens {
+                let sid = makeScreenID(for: screen)
+                let startIndex = screenCycleController.currentIndex(for: screen) ?? 0
+                initialImages[sid] = foundImages[startIndex]
             }
 
             currentImages = initialImages
@@ -1107,23 +1129,8 @@ final class WallpaperViewModel: ObservableObject {
     /// Resets the wallpaper cycling indices for each screen based on the current shuffle setting.
     /// - Note: In shuffle mode, each screen starts at a random image; otherwise, starting indices are staggered across screens.
     private func resetScreenCycleIndices() {
-        guard !foundImages.isEmpty else { return }
-
         let screens = NSScreen.screens
-        screenCycleIndices.removeAll()
-
-        for (index, screen) in screens.enumerated() {
-            let startIndex: Int
-            if settings.isShuffleEnabled {
-                // Random starting point for each screen
-                startIndex = Int.random(in: 0..<foundImages.count)
-            } else {
-                // Staggered starting points for each screen
-                startIndex = index % foundImages.count
-            }
-            screenCycleIndices[screen] = startIndex
-        }
-
+        screenCycleController.reset(for: screens, imageCount: foundImages.count, shuffle: settings.isShuffleEnabled)
         logger.debug("Reset screen cycle indices for \(screens.count) screens")
     }
 
@@ -1190,7 +1197,7 @@ extension WallpaperViewModel: FileMonitorDelegate {
         try? await Task.sleep(nanoseconds: 2_000_000_000) // 2 seconds
 
         if !isScanning {
-            await scanFolder(directory, showProgress: false)
+            startScan(directory, showProgress: false)
         }
     }
 
@@ -1227,3 +1234,4 @@ extension WallpaperViewModel {
         logger.info("Performance stats: \(stats)")
     }
 }
+

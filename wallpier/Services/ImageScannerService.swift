@@ -9,13 +9,7 @@ import Foundation
 import OSLog
 import UniformTypeIdentifiers
 
-/// Protocol for image scanning operations
-protocol ImageScannerServiceProtocol {
-    func scanDirectory(_ url: URL) async throws -> [ImageFile]
-    func scanDirectoryRecursively(_ url: URL, progress: @escaping (Int) -> Void) async throws -> [ImageFile]
-    func validateImageFile(_ url: URL) -> Bool
-    func quickScanDirectory(_ url: URL, maxDepth: Int) async throws -> [ImageFile]
-}
+// Note: ImageScannerServiceProtocol is defined in Utilities/Protocols.swift
 
 /// Service responsible for scanning directories for image files with performance optimizations
 actor ImageScannerService: ImageScannerServiceProtocol {

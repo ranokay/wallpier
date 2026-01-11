@@ -8,7 +8,7 @@
 import Foundation
 
 /// Configuration for wallpaper cycling behavior
-struct CycleConfiguration: Codable {
+struct CycleConfiguration: Codable, Sendable {
     /// Current cycling session identifier
     let sessionId: UUID
 
@@ -277,7 +277,7 @@ extension CycleConfiguration {
 // MARK: - Supporting Types
 
 /// Statistics for the current cycling session
-struct CycleStatistics: Codable {
+struct CycleStatistics: Codable, Sendable {
     /// Session start time
     let sessionStartTime: Date
 

@@ -47,6 +47,8 @@ final class SettingsViewModel: ObservableObject {
     private var cancellables = Set<AnyCancellable>()
 
     /// Currently accessed security-scoped URL that needs to be released
+    /// Using nonisolated(unsafe) is required here because deinit is nonisolated
+    /// and we need to release the security-scoped resource when the object is deallocated
     nonisolated(unsafe) private var currentSecurityScopedURL: URL?
 
     // MARK: - Callbacks
@@ -91,14 +93,16 @@ final class SettingsViewModel: ObservableObject {
     }
 
     deinit {
-        stopAccessingCurrentSecurityScopedResource()
-        logger.info("SettingsViewModel deinitialized")
+        // Safe to call from nonisolated context since currentSecurityScopedURL is nonisolated(unsafe)
+        if let currentURL = currentSecurityScopedURL {
+            currentURL.stopAccessingSecurityScopedResource()
+        }
     }
 
     // MARK: - Security-Scoped Resource Management
 
     /// Stops accessing the current security-scoped resource if one exists
-    nonisolated private func stopAccessingCurrentSecurityScopedResource() {
+    private func stopAccessingCurrentSecurityScopedResource() {
         if let currentURL = currentSecurityScopedURL {
             currentURL.stopAccessingSecurityScopedResource()
             logger.info("Stopped accessing security-scoped resource: \(currentURL.path)")
@@ -124,9 +128,19 @@ final class SettingsViewModel: ObservableObject {
 
     // MARK: - Public Interface
 
-    /// Opens a folder selection dialog
+    /// Opens a folder selection dialog (for settings window - requires Save to apply)
     func selectFolder() {
-        logger.info("Opening folder selection dialog")
+        openFolderSelectionPanel(saveImmediately: false)
+    }
+
+    /// Opens a folder selection dialog and saves immediately (for sidebar/quick settings)
+    func selectFolderAndSaveImmediately() {
+        openFolderSelectionPanel(saveImmediately: true)
+    }
+
+    /// Opens the folder selection panel
+    private func openFolderSelectionPanel(saveImmediately: Bool) {
+        logger.info("Opening folder selection dialog, saveImmediately: \(saveImmediately)")
 
         isFolderSelectionOpen = true
 
@@ -150,7 +164,7 @@ final class SettingsViewModel: ObservableObject {
                 self?.isFolderSelectionOpen = false
 
                 if result == .OK, let selectedURL = openPanel.url {
-                    self?.handleFolderSelection(selectedURL)
+                    self?.handleFolderSelection(selectedURL, saveImmediately: saveImmediately)
                 }
             }
         }
@@ -318,8 +332,9 @@ private extension SettingsViewModel {
     }
 
     /// Handles folder selection from the open panel
-    func handleFolderSelection(_ url: URL) {
-        logger.info("Folder selected: \(url.path)")
+    /// - Parameter saveImmediately: If true, saves settings immediately after selection (for sidebar/quick settings)
+    func handleFolderSelection(_ url: URL, saveImmediately: Bool = false) {
+        logger.info("Folder selected: \(url.path), saveImmediately: \(saveImmediately)")
 
         // Check if we can access the folder
         guard FileManager.default.fileExists(atPath: url.path) else {
@@ -347,11 +362,18 @@ private extension SettingsViewModel {
             // Don't return here - the folder selection can still work without the bookmark
         }
 
-        // Mark as having unsaved changes
-        hasUnsavedChanges = true
-
-        // Show toast notification
-        showToast(message: "Folder selected: \(url.lastPathComponent)")
+        if saveImmediately {
+            // Save immediately and notify (used for sidebar/quick settings)
+            settings.save()
+            originalSettings = settings
+            onSettingsSaved?(settings)
+            hasUnsavedChanges = false
+            showToast(message: "Folder selected: \(url.lastPathComponent)")
+        } else {
+            // Mark as having unsaved changes (used in settings window)
+            hasUnsavedChanges = true
+            showToast(message: "Folder selected: \(url.lastPathComponent)")
+        }
 
         logger.info("Folder selection completed")
     }

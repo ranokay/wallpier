@@ -10,6 +10,13 @@ import OSLog
 import AppKit
 import Darwin
 
+// MARK: - Notification Names
+
+extension Notification.Name {
+    /// Posted when memory usage exceeds the configured threshold
+    static let memoryPressureDetected = Notification.Name("com.oxystack.wallpier.memoryPressureDetected")
+}
+
 
 /// Performance monitoring utility for tracking app metrics
 final class PerformanceMonitor: ObservableObject {
@@ -28,16 +35,25 @@ final class PerformanceMonitor: ObservableObject {
 
     // MARK: - Performance Targets (adjusted for image handling app)
 
-    private let maxMemoryUsage: Double = 200.0 // MB (increased for image apps)
+    private var maxMemoryUsage: Double = 500.0 // MB (configurable via settings)
     private let maxScanTime: TimeInterval = 1.0 // seconds for 1000 images
     private let maxWallpaperChangeTime: TimeInterval = 0.5 // seconds
     private let minCacheHitRate: Double = 0.6 // 60% (more lenient)
+
+    /// Updates the memory usage limit from settings
+    func updateMemoryLimit(_ limitMB: Int) {
+        if limitMB > 0 {
+            maxMemoryUsage = Double(limitMB)
+        } else {
+            maxMemoryUsage = Double.infinity // Disable warnings
+        }
+    }
 
     // MARK: - Internal Tracking
 
     private var scanTimes: [TimeInterval] = []
     private var wallpaperChangeTimes: [TimeInterval] = []
-    private var monitoringTimer: Timer?
+    private var monitoringTask: Task<Void, Never>?
     private var isMonitoring = false
     private var previousCPUInfo = host_cpu_load_info()
     private var previousCPUInfoValid = false
@@ -57,9 +73,11 @@ final class PerformanceMonitor: ObservableObject {
         guard !isMonitoring else { return }
 
         isMonitoring = true
-        monitoringTimer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: true) { [weak self] _ in
-            Task { @MainActor in
-                self?.updateMetrics()
+        monitoringTask = Task { [weak self] in
+            guard let self else { return }
+            while !Task.isCancelled && self.isMonitoring {
+                await MainActor.run { self.updateMetrics() }
+                do { try await Task.sleep(nanoseconds: 5_000_000_000) } catch { break }
             }
         }
 
@@ -69,8 +87,8 @@ final class PerformanceMonitor: ObservableObject {
     /// Stops performance monitoring
     func stopMonitoring() {
         isMonitoring = false
-        monitoringTimer?.invalidate()
-        monitoringTimer = nil
+        monitoringTask?.cancel()
+        monitoringTask = nil
 
         logger.info("Performance monitoring stopped")
     }
@@ -148,10 +166,24 @@ final class PerformanceMonitor: ObservableObject {
 
     /// Forces immediate metrics update
     func updateMetricsNow() {
-        updateMetrics()
+        if Thread.isMainThread {
+            updateMetrics()
+        } else {
+            Task { @MainActor in
+                self.updateMetrics()
+            }
+        }
     }
 
     // MARK: - Private Implementation
+
+    /// Tracks if we've already triggered cleanup for current high memory state
+    private var memoryCleanupTriggered = false
+    private var lastMemoryCleanupTime = Date.distantPast
+    private let memoryCleanupCooldown: TimeInterval = 30.0 // Minimum 30 seconds between cleanups
+
+    /// Callback for memory pressure events
+    var onMemoryPressure: (() -> Void)?
 
     /// Updates all performance metrics
     private func updateMetrics() {
@@ -180,6 +212,19 @@ final class PerformanceMonitor: ObservableObject {
 
             if memoryUsage > maxMemoryUsage {
                 logger.warning("Memory usage exceeded target: \(String(format: "%.1f", self.memoryUsage))MB (target: \(String(format: "%.1f", self.maxMemoryUsage))MB)")
+
+                // Trigger cleanup if not recently done
+                let now = Date()
+                if !memoryCleanupTriggered || now.timeIntervalSince(lastMemoryCleanupTime) > memoryCleanupCooldown {
+                    memoryCleanupTriggered = true
+                    lastMemoryCleanupTime = now
+                    logger.info("Triggering memory cleanup due to pressure")
+                    onMemoryPressure?()
+                    NotificationCenter.default.post(name: .memoryPressureDetected, object: nil)
+                }
+            } else {
+                // Reset cleanup flag when memory is back below threshold
+                memoryCleanupTriggered = false
             }
         }
     }

@@ -9,7 +9,7 @@ import Foundation
 import AppKit
 
 /// Represents an image file with metadata
-struct ImageFile: Codable, Identifiable, Hashable {
+struct ImageFile: Codable, Identifiable, Hashable, Sendable {
     /// Unique identifier for the image file
     let id = UUID()
 

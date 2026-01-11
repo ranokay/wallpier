@@ -11,27 +11,7 @@ import ServiceManagement
 import OSLog
 import Combine
 
-/// Protocol defining system integration capabilities
-@MainActor
-protocol SystemServiceProtocol: Sendable {
-    /// Request necessary permissions for the app
-    func requestPermissions() async -> Bool
-
-    /// Check if launch at startup is enabled
-    var isLaunchAtStartupEnabled: Bool { get }
-
-    /// Enable or disable launch at startup
-    func setLaunchAtStartup(_ enabled: Bool) async -> Bool
-
-    /// Check current permission status
-    func checkPermissionStatus() -> PermissionStatus
-
-    /// Hide dock icon for menu bar only operation
-    func configureDockVisibility(_ visible: Bool)
-
-    /// Handle app state changes
-    func handleAppStateChange(_ state: AppState)
-}
+// Note: SystemServiceProtocol is defined in Utilities/Protocols.swift
 
 /// System permission status
 enum PermissionStatus: Equatable {
