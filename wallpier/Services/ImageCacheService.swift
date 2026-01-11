@@ -19,8 +19,11 @@ import Combine
 
     /// Multi-level caching system
     private let imageCache = NSCache<NSString, NSImage>()
-    private let metadataCache = NSCache<NSString, ImageMetadata>()
     private let thumbnailCache = NSCache<NSString, NSImage>()
+    private let metadataCache = NSCache<NSString, ImageMetadata>()
+
+    /// Disk-based thumbnail cache for persistence
+    private let thumbnailCacheManager = ThumbnailCacheManager()
 
     /// Keep track of keys in the cache for eviction strategy
     private var cachedImageKeys = Set<NSString>()
@@ -379,6 +382,30 @@ import Combine
         return nil
     }
 
+    /// Retrieve thumbnail from disk cache or generate if needed (async)
+    /// - Parameters:
+    ///   - url: URL of the source image
+    ///   - modificationDate: File modification date for cache invalidation
+    /// - Returns: Thumbnail image (from disk cache or newly generated)
+    func getThumbnailFromDisk(for url: URL, modificationDate: Date) async -> NSImage? {
+        // Try disk cache first
+        if let diskThumbnail = await thumbnailCacheManager.getThumbnail(for: url, modificationDate: modificationDate) {
+            // Also cache in memory for faster subsequent access
+            let key = thumbnailKey(for: url, size: 256)
+            if !isUnderMemoryPressure {
+                thumbnailCache.setObject(diskThumbnail, forKey: key, cost: estimateImageMemorySize(diskThumbnail))
+            }
+            return diskThumbnail
+        }
+        return nil
+    }
+
+    /// Preload thumbnails for gallery (batch operation using disk cache)
+    func preloadGalleryThumbnails(_ imageFiles: [ImageFile]) async {
+        await thumbnailCacheManager.preloadThumbnails(imageFiles, maxConcurrent: 4)
+        logger.info("Preloaded \(imageFiles.count) gallery thumbnails")
+    }
+
     /// Load or create a thumbnail, using cache if available
     func loadThumbnail(from url: URL, maxSize: CGFloat) async -> NSImage? {
         let key = thumbnailKey(for: url, size: maxSize)
@@ -568,42 +595,62 @@ import Combine
 
     /// Much more aggressive smart eviction
     private func performSmartEviction() async {
-        // Get all metadata for scoring
-        var scoredEntries: [(key: NSString, score: Double)] = []
+        let startTime = CFAbsoluteTimeGetCurrent()
+
+        // Get current memory usage
+        let currentMemory = getCurrentMemoryUsage()
+        let memoryLimitMB = maxCacheSize
+        let memoryPressureLevel = Double(currentMemory) / Double(memoryLimitMB * 1024 * 1024) // Convert limit to bytes
+
+        // Progressive cleanup based on memory pressure level
+        let evictionPercentage: Double
+        if memoryPressureLevel < 0.7 {
+            // Low pressure - no cleanup needed
+            logger.debug("Low memory pressure (\(String(format: "%.1f", memoryPressureLevel * 100))%) - no smart eviction needed.")
+            return
+        } else if memoryPressureLevel < 0.85 {
+            // Moderate pressure - evict 20% (oldest/largest)
+            evictionPercentage = 0.2
+            logger.info("Moderate memory pressure (\(String(format: "%.1f", memoryPressureLevel * 100))%) - evicting 20% of cache")
+        } else if memoryPressureLevel < 0.95 {
+            // High pressure - evict 50%
+            evictionPercentage = 0.5
+            logger.warning("High memory pressure (\(String(format: "%.1f", memoryPressureLevel * 100))%) - evicting 50% of cache")
+        } else {
+            // Extreme pressure - clear all
+            evictionPercentage = 1.0
+            logger.error("Extreme memory pressure (\(String(format: "%.1f", memoryPressureLevel * 100))%) - clearing cache")
+        }
+
+        // Collect all cached entries with their metadata
+        var entriesToEval: [(key: NSString, metadata: ImageMetadata)] = []
         for key in cachedImageKeys {
             if let metadata = metadataCache.object(forKey: key) {
-                scoredEntries.append((key, metadata.retentionScore))
-            } else {
-                // Remove orphaned entries
-                imageCache.removeObject(forKey: key)
-                thumbnailCache.removeObject(forKey: key)
-                cachedImageKeys.remove(key)
+                entriesToEval.append((key, metadata))
             }
         }
 
-        guard !scoredEntries.isEmpty else { return }
+        guard !entriesToEval.isEmpty else { return }
 
-        // Sort by score (lowest score first for eviction)
-        scoredEntries.sort { $0.score < $1.score }
+        // Sort by retention score (lowest = should evict first)
+        let sortedEntries = entriesToEval.sorted { $0.metadata.retentionScore < $1.metadata.retentionScore }
 
-        // More aggressive target - keep cache smaller
-        let targetSize = Int(Double(maxCacheSize) * 1024 * 1024 * 0.5) // Target 50% of max
-        var currentSize = getActualCacheSize()
-        var evictedCount = 0
+        // Calculate how many to evict
+        let evictCount = Int(Double(sortedEntries.count) * evictionPercentage)
+        let toEvict = Array(sortedEntries.prefix(evictCount))
 
-        for (key, _) in scoredEntries {
-            if currentSize > targetSize && evictedCount < 10 { // Limit evictions per cycle
-                removeCachedImage(for: URL(string: key as String)!)
-                currentSize = getActualCacheSize()
-                evictedCount += 1
-            } else {
-                break
-            }
+        // Evict selected entries
+        var freedMemory = 0
+        for (key, metadata) in toEvict {
+            imageCache.removeObject(forKey: key)
+            thumbnailCache.removeObject(forKey: key)
+            metadataCache.removeObject(forKey: key)
+            cachedImageKeys.remove(key)
+            freedMemory += metadata.fileSize
         }
 
-        if evictedCount > 0 {
-            logger.debug("Cache evicted \(evictedCount) images, size: \(self.formatBytes(currentSize))")
-        }
+        let elapsed = CFAbsoluteTimeGetCurrent() - startTime
+        logger.info("Smart eviction completed: removed \(toEvict.count)/\(sortedEntries.count) entries, freed \(self.formatBytes(freedMemory)) in \(String(format: "%.3f", elapsed))s")
     }
 
     /// Get more accurate cache size estimation
@@ -660,7 +707,8 @@ import Combine
         lastMemoryWarning = Date()
 
         // Longer cooldown period
-        DispatchQueue.main.asyncAfter(deadline: .now() + 60) { [weak self] in
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 60_000_000_000) // 60 seconds
             self?.recoverFromMemoryPressure()
         }
     }

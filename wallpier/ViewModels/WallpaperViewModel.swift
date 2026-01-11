@@ -24,6 +24,10 @@ final class WallpaperViewModel: ObservableObject {
     private let imageCache: ImageCacheService
     private let fileMonitor: FileMonitorService
 
+    // MARK: - Helper Managers
+
+    private let cycleManager: ImageCycleManager
+
     /// Public access to cache service for thumbnail caching in gallery
     var cacheService: ImageCacheService { imageCache }
 
@@ -54,10 +58,7 @@ final class WallpaperViewModel: ObservableObject {
     // MARK: - Performance Optimizations
 
     private var cancellables = Set<AnyCancellable>()
-    private var cycleTask: Task<Void, Never>?
-    private var countdownTask: Task<Void, Never>?
     private var idleCleanupTimer: Timer?
-    private var cycleConfiguration = CycleConfiguration()
 
     // Background processing queues
     private let scanningQueue = DispatchQueue(label: "com.oxystack.wallpier.scanning", qos: .userInitiated)
@@ -98,12 +99,14 @@ final class WallpaperViewModel: ObservableObject {
     init(wallpaperService: WallpaperServiceProtocol? = nil,
          imageScanner: ImageScannerService? = nil,
          imageCache: ImageCacheService? = nil,
-         fileMonitor: FileMonitorService? = nil) {
+         fileMonitor: FileMonitorService? = nil,
+         cycleManager: ImageCycleManager? = nil) {
 
         self.wallpaperService = wallpaperService ?? WallpaperService()
         self.imageScanner = imageScanner ?? ImageScannerService()
         self.imageCache = imageCache ?? ImageCacheService(maxCacheSizeMB: 25) // Further reduced to 25MB
         self.fileMonitor = fileMonitor ?? FileMonitorService()
+        self.cycleManager = cycleManager ?? ImageCycleManager()
 
         setupFileMonitoring()
         setupBindings()
@@ -117,8 +120,7 @@ final class WallpaperViewModel: ObservableObject {
 
     deinit {
         // Perform synchronous cleanup only - can't call async methods in deinit
-        cycleTask?.cancel()
-        countdownTask?.cancel()
+        // cycleManager.stopTimer() is MainActor-isolated and can't be called here
         idleCleanupTimer?.invalidate()
         fileMonitor.stopMonitoring()
         preloadingTask?.cancel()
@@ -202,12 +204,12 @@ final class WallpaperViewModel: ObservableObject {
         }
 
         // Configure cycle with current images
-        cycleConfiguration.updateQueue(foundImages, preservePosition: false)
+        cycleManager.updateQueue(foundImages, preservePosition: false)
 
         if settings.isShuffleEnabled {
-            cycleConfiguration.shuffleQueue()
+            cycleManager.shuffleQueue()
         } else {
-            cycleConfiguration.sortQueue(settings.sortOrder)
+            cycleManager.sortQueue(settings.sortOrder)
         }
 
         // Set initial wallpaper
@@ -218,7 +220,6 @@ final class WallpaperViewModel: ObservableObject {
         startPreloading()
 
         isRunning = true
-        cycleConfiguration.isActive = true
         updateStatus("Cycling active")
 
         logger.info("Wallpaper cycling started with \(self.foundImages.count) images")
@@ -232,7 +233,6 @@ final class WallpaperViewModel: ObservableObject {
         stopPreloading()
 
         isRunning = false
-        cycleConfiguration.isActive = false
         timeUntilNextChange = 0
 
         // Clear screen cycle indices to ensure fresh start next time
@@ -369,18 +369,18 @@ final class WallpaperViewModel: ObservableObject {
            oldSettings.sortOrder != newSettings.sortOrder {
 
             if newSettings.isShuffleEnabled {
-                cycleConfiguration.shuffleQueue()
+                cycleManager.shuffleQueue()
                 // Reset screen indices for fresh randomization
                 resetScreenCycleIndices()
             } else {
-                cycleConfiguration.sortQueue(newSettings.sortOrder)
+                cycleManager.sortQueue(newSettings.sortOrder)
                 // Reset screen indices for new order
                 resetScreenCycleIndices()
             }
 
             // Update preview after shuffle/sort changes
             if !foundImages.isEmpty {
-                currentImage = cycleConfiguration.currentImage
+                currentImage = cycleManager.currentImage
                 setupInitialMultiMonitorPreview()
             }
         }
@@ -541,17 +541,17 @@ final class WallpaperViewModel: ObservableObject {
 
                 // Set up cycle configuration with new images
                 if !images.isEmpty {
-                    cycleConfiguration.updateQueue(images, preservePosition: false)
+                    cycleManager.updateQueue(images, preservePosition: false)
 
                     // Apply shuffle or sort based on current settings
                     if settings.isShuffleEnabled {
-                        cycleConfiguration.shuffleQueue()
+                        cycleManager.shuffleQueue()
                     } else {
-                        cycleConfiguration.sortQueue(settings.sortOrder)
+                        cycleManager.sortQueue(settings.sortOrder)
                     }
 
-                    // Set the first image as current for preview
-                    currentImage = cycleConfiguration.currentImage
+                   // Set the first image as current for preview
+                    currentImage = cycleManager.currentImage
 
                     // Set up multi-monitor preview if needed
                     setupInitialMultiMonitorPreview()
@@ -632,7 +632,7 @@ final class WallpaperViewModel: ObservableObject {
             return
         }
 
-        let currentIndex = cycleConfiguration.currentIndex
+        let currentIndex = cycleManager.currentIndex
         var urlsToPreload: [URL] = []
 
         // Ultra-conservative preloading - only next image when actively cycling
@@ -679,7 +679,7 @@ final class WallpaperViewModel: ObservableObject {
 
         if settings.multiMonitorSettings.useSameWallpaperOnAllMonitors {
             // Use single wallpaper for all monitors
-            guard let imageFile = cycleConfiguration.currentImage else {
+            guard let imageFile = cycleManager.currentImage else {
                 updateStatus("No current image available")
                 return
             }
@@ -708,7 +708,7 @@ final class WallpaperViewModel: ObservableObject {
     private func setNextWallpaper() async {
         if settings.multiMonitorSettings.useSameWallpaperOnAllMonitors {
             // Standard single-image cycling
-            guard let nextImage = cycleConfiguration.advanceToNext() else {
+            guard let nextImage = cycleManager.advanceToNext() else {
                 updateStatus("No next image available")
                 return
             }
@@ -731,7 +731,7 @@ final class WallpaperViewModel: ObservableObject {
     private func setPreviousWallpaper() async {
         if settings.multiMonitorSettings.useSameWallpaperOnAllMonitors {
             // Standard single-image cycling
-            guard let prevImage = cycleConfiguration.goToPrevious() else {
+            guard let prevImage = cycleManager.goToPrevious() else {
                 updateStatus("No previous image available")
                 return
             }
@@ -758,7 +758,7 @@ final class WallpaperViewModel: ObservableObject {
 
         if settings.multiMonitorSettings.useSameWallpaperOnAllMonitors {
             // Use same wallpaper on all monitors - advance from current image
-            guard let nextImage = cycleConfiguration.advanceToNext() else {
+            guard let nextImage = cycleManager.advanceToNext() else {
                 updateStatus("No next image available")
                 return
             }
@@ -812,7 +812,7 @@ final class WallpaperViewModel: ObservableObject {
 
         if settings.multiMonitorSettings.useSameWallpaperOnAllMonitors {
             // Use same wallpaper on all monitors - go back from current image
-            guard let prevImage = cycleConfiguration.goToPrevious() else {
+            guard let prevImage = cycleManager.goToPrevious() else {
                 updateStatus("No previous image available")
                 return
             }
@@ -969,53 +969,22 @@ final class WallpaperViewModel: ObservableObject {
             return startCycleTimer() // Retry with valid interval
         }
 
-        cycleTask = Task { [weak self] in
-            guard let self else { return }
-            // Immediately schedule the countdown for UI
-            await MainActor.run { self.timeUntilNextChange = interval }
-            startCountdownTimer()
-            while !Task.isCancelled {
-                do {
-                    try await Task.sleep(nanoseconds: UInt64(interval * 1_000_000_000))
-                } catch { break }
-                await self.setNextWallpaper()
-                await MainActor.run { self.timeUntilNextChange = interval }
+        cycleManager.startTimer(
+            interval: interval,
+            onTick: { [weak self] in
+                await self?.setNextWallpaper()
+            },
+            updateTimeRemaining: { [weak self] timeRemaining in
+                self?.timeUntilNextChange = timeRemaining
             }
-        }
+        )
 
         logger.debug("Cycle task started with interval: \(interval)s")
     }
 
-    /// Starts countdown task for UI updates
-    private func startCountdownTimer() {
-        stopCountdownTimer()
-
-        countdownTask = Task { [weak self] in
-            guard let self else { return }
-            while !Task.isCancelled {
-                do { try await Task.sleep(nanoseconds: 1_000_000_000) } catch { break }
-                await MainActor.run {
-                    guard self.isRunning else { return }
-                    self.timeUntilNextChange = max(0, self.timeUntilNextChange - 1)
-                    if self.timeUntilNextChange <= 0 {
-                        self.timeUntilNextChange = self.settings.cyclingInterval
-                    }
-                }
-            }
-        }
-    }
-
     /// Stops cycling task
     private func stopCycleTimer() {
-        cycleTask?.cancel()
-        cycleTask = nil
-        stopCountdownTimer()
-    }
-
-    /// Stops countdown task
-    private func stopCountdownTimer() {
-        countdownTask?.cancel()
-        countdownTask = nil
+        cycleManager.stopTimer()
     }
 
     /// Restarts cycle timer with new interval
@@ -1057,7 +1026,7 @@ final class WallpaperViewModel: ObservableObject {
 
     /// Updates cycle progress indicator
     private func updateCycleProgress() {
-        cycleProgress = cycleConfiguration.cycleProgress
+        cycleProgress = cycleManager.cycleProgress
     }
 
     /// Starts monitoring folder for changes
@@ -1104,7 +1073,7 @@ final class WallpaperViewModel: ObservableObject {
 
         if settings.multiMonitorSettings.useSameWallpaperOnAllMonitors {
             // Use the same first image for all screens in preview
-            if let firstImage = cycleConfiguration.currentImage {
+            if let firstImage = cycleManager.currentImage {
                 for screen in screens {
                     let sid = makeScreenID(for: screen)
                     currentImages[sid] = firstImage
@@ -1156,11 +1125,11 @@ extension WallpaperViewModel {
     }
 
     var canAdvance: Bool {
-        return !foundImages.isEmpty && cycleConfiguration.canAdvance
+        return !foundImages.isEmpty && cycleManager.canAdvance
     }
 
     var canGoBack: Bool {
-        return !foundImages.isEmpty && cycleConfiguration.canGoBack
+        return !foundImages.isEmpty && cycleManager.canGoBack
     }
 
     var cyclingInterval: TimeInterval {
@@ -1178,9 +1147,9 @@ extension WallpaperViewModel {
         set {
             settings.isShuffleEnabled = newValue
             if newValue {
-                cycleConfiguration.shuffleQueue()
+                cycleManager.shuffleQueue()
             } else {
-                cycleConfiguration.sortQueue(settings.sortOrder)
+                cycleManager.sortQueue(settings.sortOrder)
             }
             updateCycleProgress()
         }

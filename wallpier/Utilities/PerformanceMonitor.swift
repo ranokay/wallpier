@@ -220,8 +220,17 @@ final class PerformanceMonitor: ObservableObject {
                     lastMemoryCleanupTime = now
                     logger.info("Triggering memory cleanup due to pressure")
                     onMemoryPressure?()
-                    NotificationCenter.default.post(name: .memoryPressureDetected, object: nil)
+                   // Post memory pressure notification
+            if memoryUsage > maxMemoryUsage { // Using existing memoryUsage and maxMemoryUsage
+                Task { @MainActor in
+                    NotificationCenter.default.post(
+                        name: .memoryPressureDetected,
+                        object: nil,
+                        userInfo: ["memoryUsage": memoryUsage, "memoryLimit": maxMemoryUsage]
+                    )
                 }
+            }
+        }
             } else {
                 // Reset cleanup flag when memory is back below threshold
                 memoryCleanupTriggered = false

@@ -20,15 +20,25 @@ extension Notification.Name {
 
 @main
 struct wallpierApp: App {
+    // MARK: - State Objects
+
     @StateObject private var wallpaperViewModel = WallpaperViewModel()
     @StateObject private var settingsViewModel: SettingsViewModel
+    @StateObject private var errorPresenter = ErrorPresenter()
     @StateObject private var systemService = SystemService()
     @State private var showingMainWindow = true
     @State private var showingSettings = false
 
+    // MARK: - App Storage
+
+    @AppStorage("hideDock") private var hideDock = false
+    @AppStorage("showsMenuBar") private var showsMenuBar = true
+    @AppStorage("hasLaunchedBefore") private var hasLaunchedBefore = false
+
     init() {
+        // Load settings for SettingsViewModel
         let settings = WallpaperSettings.load()
-        self._settingsViewModel = StateObject(wrappedValue: SettingsViewModel(settings: settings))
+        _settingsViewModel = StateObject(wrappedValue: SettingsViewModel(settings: settings))
 
         // Setup app delegate
         NSApplication.shared.delegate = AppDelegate.shared
@@ -47,6 +57,7 @@ struct wallpierApp: App {
                 .environmentObject(wallpaperViewModel)
                 .environmentObject(settingsViewModel)
                 .environmentObject(systemService)
+                .environmentObject(errorPresenter)
                 .tint(appAccentColor)
                 .frame(minWidth: 950, minHeight: 700)
                 .onReceive(NotificationCenter.default.publisher(for: .openMainWindow)) { _ in

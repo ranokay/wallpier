@@ -125,7 +125,7 @@ final class FileMonitorService: NSObject, FileMonitorServiceProtocol {
         // Debounce rapid changes
         debounceFileSystemChanges {
             // Call the callback on main queue
-            DispatchQueue.main.async {
+            Task { @MainActor in
                 self.changeCallback?()
                 if let delegate = self.delegate {
                     Task {
@@ -205,7 +205,7 @@ extension FileMonitorService {
         stopMonitoring()
 
         // Notify delegate
-        DispatchQueue.main.async {
+        Task { @MainActor in
             if let delegate = self.delegate {
                 Task {
                     await delegate.fileMonitorDidFailWithError(self, error: error)

@@ -47,7 +47,7 @@ enum WallpaperError: LocalizedError {
     case systemIntegrationFailed
     case fileNotFound
     case unsupportedImageType
-    case noScreensAvailable
+    case noAvailableScreens
     case setWallpaperFailed(underlying: Error)
 
     var errorDescription: String? {
@@ -61,11 +61,11 @@ enum WallpaperError: LocalizedError {
         case .systemIntegrationFailed:
             return "Failed to integrate with system wallpaper settings."
         case .fileNotFound:
-            return "The specified image file could not be found."
+            return "Image file not found"
         case .unsupportedImageType:
-            return "This image type is not supported for wallpapers."
-        case .noScreensAvailable:
-            return "No screens are available to set wallpaper."
+            return "Unsupported image format"
+        case .noAvailableScreens:
+            return "No displays available - please connect a display"
         case .setWallpaperFailed(let underlying):
             return "Failed to set wallpaper: \(underlying.localizedDescription)"
         }
@@ -81,7 +81,7 @@ enum WallpaperError: LocalizedError {
             return "Verify the file exists and select a valid folder."
         case .systemIntegrationFailed:
             return "Try restarting the application or your Mac."
-        case .noScreensAvailable:
+        case .noAvailableScreens:
             return "Ensure at least one display is connected."
         case .setWallpaperFailed:
             return "Try selecting a different image or restart the application."

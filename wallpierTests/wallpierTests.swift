@@ -318,7 +318,7 @@ struct ErrorTests {
             .folderNotFound,
             .fileNotFound,
             .unsupportedImageType,
-            .noScreensAvailable,
+            .noAvailableScreens,
             .systemIntegrationFailed
         ]
 
