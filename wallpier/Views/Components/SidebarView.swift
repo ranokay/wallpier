@@ -171,22 +171,47 @@ struct SidebarView: View {
 
                     // Multi-Monitor Toggle (NEW - moved from Settings)
                     Toggle("Same on all monitors", isOn: $settingsViewModel.settings.multiMonitorSettings.useSameWallpaperOnAllMonitors)
-                        .toggleStyle(.checkbox)
                         .onChange(of: settingsViewModel.settings.multiMonitorSettings.useSameWallpaperOnAllMonitors) { _, _ in
                             settingsViewModel.saveSettings()
                         }
                         .accessibilityLabel("Use same wallpaper on all monitors")
                         .accessibilityHint("When enabled, the same wallpaper is shown on all displays")
 
+                    if !settingsViewModel.settings.multiMonitorSettings.useSameWallpaperOnAllMonitors {
+                        VStack(alignment: .leading, spacing: Spacing.xs) {
+                            Text("Per-Monitor Scaling")
+                                .captionStyle()
+
+                            ForEach(settingsViewModel.availableDisplayNames, id: \.self) { displayName in
+                                HStack {
+                                    Text(displayName)
+                                        .secondaryTextStyle()
+                                    Spacer()
+                                    Picker(displayName, selection: Binding(
+                                        get: { settingsViewModel.perMonitorScalingMode(for: displayName) },
+                                        set: { newValue in
+                                            settingsViewModel.setPerMonitorScalingMode(newValue, for: displayName)
+                                            settingsViewModel.saveSettings()
+                                        }
+                                    )) {
+                                        ForEach(WallpaperScalingMode.allCases, id: \.self) { mode in
+                                            Text(mode.displayName).tag(mode)
+                                        }
+                                    }
+                                    .pickerStyle(.menu)
+                                    .labelsHidden()
+                                }
+                            }
+                        }
+                    }
+
                     // Shuffle Toggle
                     Toggle("Shuffle Images", isOn: $wallpaperViewModel.isShuffleEnabled)
-                        .toggleStyle(.checkbox)
                         .accessibilityLabel("Shuffle images")
                         .accessibilityHint("When enabled, images are shown in random order")
 
                     // Scan Subfolders Toggle
                     Toggle("Scan Subfolders", isOn: $settingsViewModel.settings.isRecursiveScanEnabled)
-                        .toggleStyle(.checkbox)
                         .onChange(of: settingsViewModel.settings.isRecursiveScanEnabled) { _, _ in
                             settingsViewModel.saveSettings()
                         }

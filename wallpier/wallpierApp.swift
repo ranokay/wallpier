@@ -53,7 +53,7 @@ struct WallpierApp: App {
     @SceneBuilder
     var body: some Scene {
         // Main Window
-        WindowGroup("Wallpier") {
+        WindowGroup("Wallpier", id: "mainWindow") {
             ContentView()
                 .environmentObject(wallpaperViewModel)
                 .environmentObject(settingsViewModel)
@@ -194,6 +194,7 @@ struct StatusMenuContent: View {
     @ObservedObject var wallpaperViewModel: WallpaperViewModel
     @ObservedObject var settingsViewModel: SettingsViewModel
     @ObservedObject var systemService: SystemService
+    @Environment(\.openWindow) private var openWindow
 
     var body: some View {
         if settingsViewModel.settings.showMenuBarIcon {
@@ -315,18 +316,14 @@ struct StatusMenuContent: View {
     }
 
     private func openMainWindow() {
-        // Open or focus main window
-        if let window = NSApplication.shared.windows.first(where: { $0.title == "Wallpier" }) {
-            window.makeKeyAndOrderFront(nil)
-            NSApplication.shared.activate(ignoringOtherApps: true)
-        } else {
-            // Create new window if needed
-            NotificationCenter.default.post(name: .openMainWindow, object: nil)
-        }
+        openWindow(id: "mainWindow")
+        NSApplication.shared.activate(ignoringOtherApps: true)
     }
 
     private func openSettings() {
+        openWindow(id: "mainWindow")
         NotificationCenter.default.post(name: .openSettings, object: nil)
+        NSApplication.shared.activate(ignoringOtherApps: true)
     }
 }
 
