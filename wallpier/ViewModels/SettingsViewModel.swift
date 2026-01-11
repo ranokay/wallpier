@@ -13,7 +13,7 @@ import OSLog
 /// View model for managing application settings
 @MainActor
 final class SettingsViewModel: ObservableObject {
-    private let logger = Logger(subsystem: "com.oxystack.wallpier", category: "SettingsViewModel")
+    private let logger = Logger.settings
 
     // MARK: - Published Properties
 
@@ -188,6 +188,8 @@ final class SettingsViewModel: ObservableObject {
         // Save to UserDefaults
         settings.save()
 
+        AppIntentsMetadataController.apply(disableExtraction: settings.advancedSettings.disableAppIntentsMetadataExtraction)
+
         // Notify callback
         onSettingsSaved?(settings)
 
@@ -219,7 +221,7 @@ final class SettingsViewModel: ObservableObject {
     }
 
     /// Shows a toast notification to the user
-    private func showToast(message: String) {
+    func showToast(message: String) {
         toastMessage = message
         showToast = true
 

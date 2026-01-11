@@ -99,4 +99,5 @@ struct SettingsView: View {
 
 #Preview {
     SettingsView(viewModel: SettingsViewModel(settings: WallpaperSettings()))
+        .environmentObject(WallpaperViewModel())
 }

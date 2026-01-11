@@ -16,11 +16,11 @@ import Combine
 /// Service responsible for setting desktop wallpapers
 @MainActor
 @preconcurrency final class WallpaperService: WallpaperServiceProtocol {
-    private let logger = Logger(subsystem: "com.oxystack.wallpier", category: "WallpaperService")
+    private let logger = Logger.wallpaper
     private let workspace = NSWorkspace.shared
 
     /// Supported image file extensions
-    private let supportedImageTypes = ["jpg", "jpeg", "png", "heic", "bmp", "tiff", "gif"]
+    private let supportedImageTypes = ["jpg", "jpeg", "png", "heic", "bmp", "tiff", "gif", "webp"]
 
     private let wallpaperDidChangePublisher = PassthroughSubject<URL?, Never>()
 
@@ -42,11 +42,11 @@ import Combine
     func setWallpaper(_ imageURL: URL) async throws {
         // Default to using same wallpaper on all monitors
         let defaultSettings = MultiMonitorSettings()
-        try await setWallpaper(imageURL, multiMonitorSettings: defaultSettings)
+        try await setWallpaper(imageURL, multiMonitorSettings: defaultSettings, defaultScalingMode: .fill)
     }
 
-    /// Sets wallpaper with multi-monitor support
-    func setWallpaper(_ imageURL: URL, multiMonitorSettings: MultiMonitorSettings) async throws {
+    /// Sets wallpaper with multi-monitor support and scaling preferences
+    func setWallpaper(_ imageURL: URL, multiMonitorSettings: MultiMonitorSettings, defaultScalingMode: WallpaperScalingMode) async throws {
         logger.info("Setting wallpaper with multi-monitor settings: \(imageURL.path)")
 
         // Validate file exists
@@ -63,24 +63,35 @@ import Combine
 
         let screens = NSScreen.screens
 
+        let start = CFAbsoluteTimeGetCurrent()
+
         if multiMonitorSettings.useSameWallpaperOnAllMonitors {
-            // Set same wallpaper on all screens
-            for screen in screens {
-                try await setWallpaperForScreen(imageURL, screen: screen)
+            try await withThrowingTaskGroup(of: Void.self) { group in
+                for (index, screen) in screens.enumerated() {
+                    group.addTask {
+                        let displayName = screen.localizedName.isEmpty ? "Display \(index + 1)" : screen.localizedName
+                        let scalingMode = Self.resolvedScalingMode(for: displayName, settings: multiMonitorSettings, defaultScalingMode: defaultScalingMode)
+                        let options = Self.desktopOptions(for: scalingMode)
+                        try await self.setWallpaperForScreen(imageURL, screen: screen, options: options)
+                    }
+                }
+
+                try await group.waitForAll()
             }
-        } else {
-            // For the first screen, use the provided image
-            if let mainScreen = screens.first {
-                try await setWallpaperForScreen(imageURL, screen: mainScreen)
-            }
-            // Other screens keep their current wallpapers or use default if not set
+        } else if let mainScreen = screens.first {
+            let displayName = mainScreen.localizedName.isEmpty ? "Display 1" : mainScreen.localizedName
+            let scalingMode = Self.resolvedScalingMode(for: displayName, settings: multiMonitorSettings, defaultScalingMode: defaultScalingMode)
+            let options = Self.desktopOptions(for: scalingMode)
+            try await setWallpaperForScreen(imageURL, screen: mainScreen, options: options)
+            logger.debug("Multi-monitor mode: updated main screen only, preserving others")
         }
 
-        logger.info("Successfully set wallpaper for \(screens.count) screen(s)")
+        let elapsed = CFAbsoluteTimeGetCurrent() - start
+        logger.info("Successfully set wallpaper for \(screens.count) screen(s) in \(String(format: "%.3f", elapsed))s")
     }
 
     /// Sets different wallpapers for multiple monitors
-    func setWallpaperForMultipleMonitors(_ imageURLs: [URL], multiMonitorSettings: MultiMonitorSettings) async throws {
+    func setWallpaperForMultipleMonitors(_ imageURLs: [URL], multiMonitorSettings: MultiMonitorSettings, defaultScalingMode: WallpaperScalingMode) async throws {
         logger.info("Setting multiple wallpapers for monitors: \(imageURLs.count) images")
 
         let screens = NSScreen.screens
@@ -105,11 +116,8 @@ import Combine
                 for (index, screen) in screens.enumerated() {
                     group.addTask {
                         let displayName = screen.localizedName.isEmpty ? "Display \(index + 1)" : screen.localizedName
-                        let scalingMode = multiMonitorSettings.perMonitorScaling[displayName] ?? .fill
-                        let options: [NSWorkspace.DesktopImageOptionKey: Any] = [
-                            .allowClipping: true,
-                            .imageScaling: scalingMode.nsImageScaling.rawValue
-                        ]
+                        let scalingMode = Self.resolvedScalingMode(for: displayName, settings: multiMonitorSettings, defaultScalingMode: defaultScalingMode)
+                        let options = Self.desktopOptions(for: scalingMode)
                         try await self.setWallpaperForScreen(imageURL, screen: screen, options: options)
                     }
                 }
@@ -125,11 +133,8 @@ import Combine
                         let imageIndex = index % imageURLs.count // Cycle through images if more screens than images
                         let imageURL = imageURLs[imageIndex]
                         let displayName = screen.localizedName.isEmpty ? "Display \(index + 1)" : screen.localizedName
-                        let scalingMode = multiMonitorSettings.perMonitorScaling[displayName] ?? .fill
-                        let options: [NSWorkspace.DesktopImageOptionKey:Any] = [
-                            .allowClipping: true,
-                            .imageScaling: scalingMode.nsImageScaling.rawValue
-                        ]
+                        let scalingMode = Self.resolvedScalingMode(for: displayName, settings: multiMonitorSettings, defaultScalingMode: defaultScalingMode)
+                        let options = Self.desktopOptions(for: scalingMode)
                         try await self.setWallpaperForScreen(imageURL, screen: screen, options: options)
                     }
                 }
@@ -144,11 +149,7 @@ import Combine
 
     /// Sets wallpaper for a specific screen
     func setWallpaperForScreen(_ imageURL: URL, screen: NSScreen? = nil) async throws {
-        // Default options for backward compatibility
-        let defaultOptions: [NSWorkspace.DesktopImageOptionKey: Any] = [
-            .allowClipping: true,
-            .imageScaling: NSImageScaling.scaleProportionallyUpOrDown.rawValue
-        ]
+        let defaultOptions = Self.desktopOptions(for: .fill)
         try await setWallpaperForScreen(imageURL, screen: screen, options: defaultOptions)
     }
 
@@ -178,28 +179,18 @@ import Combine
     /// Gets the current wallpaper URL for the main screen
     func getCurrentWallpaper() async -> URL? {
         guard let mainScreen = NSScreen.main else { return nil }
-
-        return await withCheckedContinuation { continuation in
-            Task { @MainActor in
-                let url = self.workspace.desktopImageURL(for: mainScreen)
-                continuation.resume(returning: url)
-            }
-        }
+        return workspace.desktopImageURL(for: mainScreen)
     }
 
     /// Gets current wallpapers for all screens
     func getCurrentWallpapers() async -> [NSScreen: URL] {
-        return await withCheckedContinuation { continuation in
-            Task { @MainActor in
-                var wallpapers: [NSScreen: URL] = [:]
-                for screen in NSScreen.screens {
-                    if let url = self.workspace.desktopImageURL(for: screen) {
-                        wallpapers[screen] = url
-                    }
-                }
-                continuation.resume(returning: wallpapers)
+        var wallpapers: [NSScreen: URL] = [:]
+        for screen in NSScreen.screens {
+            if let url = workspace.desktopImageURL(for: screen) {
+                wallpapers[screen] = url
             }
         }
+        return wallpapers
     }
 
     /// Returns the list of supported image file extensions
@@ -208,7 +199,7 @@ import Combine
     }
 
     /// Validates if the file type is supported for wallpapers
-    private func isValidImageType(_ url: URL) -> Bool {
+    nonisolated private func isValidImageType(_ url: URL) -> Bool {
         let fileExtension = url.pathExtension.lowercased()
         return supportedImageTypes.contains(fileExtension)
     }
@@ -219,6 +210,34 @@ import Combine
             let displayName = screen.localizedName.isEmpty ? "Display \(index + 1)" : screen.localizedName
             return (screen: screen, displayName: displayName)
         }
+    }
+}
+
+// MARK: - Desktop Options
+
+extension WallpaperService {
+    /// Resolves per-monitor scaling preference falling back to default
+    nonisolated static func resolvedScalingMode(for displayName: String, settings: MultiMonitorSettings, defaultScalingMode: WallpaperScalingMode) -> WallpaperScalingMode {
+        settings.perMonitorScaling[displayName] ?? defaultScalingMode
+    }
+
+    /// Nonisolated helper so callers in concurrent task groups avoid MainActor hops
+    nonisolated static func desktopOptions(for scalingMode: WallpaperScalingMode) -> [NSWorkspace.DesktopImageOptionKey: Any] {
+        var options: [NSWorkspace.DesktopImageOptionKey: Any] = [
+            .imageScaling: scalingMode.nsImageScaling.rawValue
+        ]
+
+        switch scalingMode {
+        case .tile:
+            options[.allowClipping] = false
+            options[.fillColor] = NSColor.black
+        case .center:
+            options[.allowClipping] = false
+        default:
+            options[.allowClipping] = true
+        }
+
+        return options
     }
 }
 

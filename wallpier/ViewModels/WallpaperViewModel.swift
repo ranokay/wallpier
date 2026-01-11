@@ -15,7 +15,7 @@ import AppKit
 /// Main view model coordinating wallpaper cycling operations with performance optimizations
 @MainActor
 final class WallpaperViewModel: ObservableObject {
-    private let logger = Logger(subsystem: "com.oxystack.wallpier", category: "WallpaperViewModel")
+    private let logger = Logger.wallpaper
 
     // MARK: - Services (Dependency Injection)
 
@@ -47,9 +47,12 @@ final class WallpaperViewModel: ObservableObject {
     @Published var cycleProgress: Double = 0.0
     @Published var availableScreens: [(id: ScreenID, screen: NSScreen, displayName: String)] = []
 
+    @Published var lastScanCompletedAt: Date?
+    @Published var averageChangeDuration: TimeInterval = 0
+
     // MARK: - Settings Integration
 
-    @Published var settings = WallpaperSettings.load() {
+    @Published var settings: WallpaperSettings {
         didSet {
             handleSettingsChange(oldValue: oldValue)
         }
@@ -72,14 +75,9 @@ final class WallpaperViewModel: ObservableObject {
     private var averageChangeTime: TimeInterval = 0
     private var changeCount = 0
 
-    /// Average time it takes to change wallpaper (for performance monitoring)
-    public var averageWallpaperChangeTime: TimeInterval {
-        return averageChangeTime
-    }
-
     // Intelligent preloading
     private var preloadingTask: Task<Void, Never>?
-    private let preloadDistance = 1 // Conservative: preload only next 1 image
+    private let maxPreloadDistance = 2 // Upper bound; adaptive logic may reduce to 0-2
 
     // UI update throttling
     private var lastUIUpdate = Date()
@@ -88,7 +86,7 @@ final class WallpaperViewModel: ObservableObject {
     // Scan throttling to prevent redundant scans
     private var lastScanTime = Date.distantPast
     private var lastScannedPath: String?
-    private let scanThrottleInterval: TimeInterval = 2.0 // Min 2 seconds between scans of same folder
+    private let scanThrottleInterval: TimeInterval = 5.0 // Min 5 seconds between scans of same folder
     private var hasCompletedInitialScan = false // Track if we've done the initial scan
 
     // Cancellable scan task
@@ -102,9 +100,15 @@ final class WallpaperViewModel: ObservableObject {
          fileMonitor: FileMonitorService? = nil,
          cycleManager: ImageCycleManager? = nil) {
 
+        let initialSettings = WallpaperSettings.load()
+
+        self.settings = initialSettings
         self.wallpaperService = wallpaperService ?? WallpaperService()
         self.imageScanner = imageScanner ?? ImageScannerService()
-        self.imageCache = imageCache ?? ImageCacheService(maxCacheSizeMB: 25) // Further reduced to 25MB
+        self.imageCache = imageCache ?? ImageCacheService(
+            maxCacheSizeMB: initialSettings.advancedSettings.maxCacheSizeMB,
+            enableLogging: initialSettings.advancedSettings.enableDetailedLogging
+        )
         self.fileMonitor = fileMonitor ?? FileMonitorService()
         self.cycleManager = cycleManager ?? ImageCycleManager()
 
@@ -394,6 +398,18 @@ final class WallpaperViewModel: ObservableObject {
         }
 
         // Apply memory limit changes
+        if oldSettings.advancedSettings != newSettings.advancedSettings {
+            imageCache.updateConfiguration(
+                maxCacheSizeMB: newSettings.advancedSettings.maxCacheSizeMB,
+                enableLogging: newSettings.advancedSettings.enableDetailedLogging
+            )
+
+            // Restart or stop preloading based on toggle
+            if oldSettings.advancedSettings.preloadNextImage != newSettings.advancedSettings.preloadNextImage {
+                Task { await startIntelligentPreloading() }
+            }
+        }
+
         PerformanceMonitor.shared.updateMemoryLimit(newSettings.advancedSettings.memoryUsageLimitMB)
     }
 
@@ -408,7 +424,7 @@ final class WallpaperViewModel: ObservableObject {
         scanTask = Task { [weak self] in
             guard let self else { return }
             // Small debounce window to coalesce changes
-            try? await Task.sleep(nanoseconds: 300_000_000) // 300ms
+            try? await Task.sleep(nanoseconds: 500_000_000) // 500ms
             await self.scanFolder(folderPath, showProgress: showProgress)
         }
     }
@@ -506,7 +522,8 @@ final class WallpaperViewModel: ObservableObject {
         updateStatus("Scanning images...")
 
         do {
-            let images: [ImageFile] = try await PerformanceMonitor.shared.timeAsync("folder_scan") {
+            let timer = PerformanceTimer("folder_scan")
+            let images: [ImageFile] = try await {
                 // Use quick scan for faster results if folder is large
                 let useQuickScan = shouldUseQuickScan(for: folderPath)
 
@@ -525,10 +542,9 @@ final class WallpaperViewModel: ObservableObject {
                 } else {
                     return try await imageScanner.scanDirectory(folderPath)
                 }
-            }
+            }()
 
-            // Record scan performance
-            let elapsed = PerformanceMonitor.shared.averageScanTime
+            let elapsed = timer.end()
             PerformanceMonitor.shared.recordScanTime(elapsed, imageCount: images.count)
 
             await MainActor.run {
@@ -563,6 +579,8 @@ final class WallpaperViewModel: ObservableObject {
                 let message = "Found \(images.count) images in \(String(format: "%.3f", elapsed))s"
                 updateStatus(message)
 
+                lastScanCompletedAt = Date()
+
                 // Mark that we've completed at least one scan (for throttling logic)
                 hasCompletedInitialScan = true
 
@@ -581,6 +599,7 @@ final class WallpaperViewModel: ObservableObject {
                 let wrapped = ScanError.underlying(error)
                 errorMessage = wrapped.localizedDescription
                 updateStatus("Scan failed: \(wrapped.localizedDescription)")
+                lastScanCompletedAt = Date()
                 logger.error("Folder scan failed: \(error.localizedDescription)")
             }
         }
@@ -632,19 +651,48 @@ final class WallpaperViewModel: ObservableObject {
             return
         }
 
+        let distance = adaptivePreloadDistance()
+        guard distance > 0 else {
+            logger.debug("Skipping preload due to adaptive distance=0")
+            return
+        }
+
         let currentIndex = cycleManager.currentIndex
         var urlsToPreload: [URL] = []
 
-        // Ultra-conservative preloading - only next image when actively cycling
-        let nextIndex = (currentIndex + 1) % foundImages.count
-        if nextIndex < foundImages.count {
-            urlsToPreload.append(foundImages[nextIndex].url)
+        for step in 1...distance {
+            let nextIndex = (currentIndex + step) % foundImages.count
+            if nextIndex < foundImages.count {
+                urlsToPreload.append(foundImages[nextIndex].url)
+            }
         }
 
         guard !urlsToPreload.isEmpty else { return }
 
         await imageCache.preloadImages(urlsToPreload, priority: .utility)
-        logger.debug("Preloaded \(urlsToPreload.count) image")
+        logger.debug("Preloaded \(urlsToPreload.count) image(s) with adaptive distance \(distance)")
+    }
+
+    /// Chooses preload distance based on memory pressure and user limits
+    private func adaptivePreloadDistance() -> Int {
+        let memoryUsageBytes = getCurrentMemoryUsage()
+        let memoryUsageMB = Double(memoryUsageBytes) / (1024 * 1024)
+        let limit = Double(settings.advancedSettings.memoryUsageLimitMB)
+
+        // If user disabled limits, stay conservative but allow two images
+        if limit == 0 {
+            return min(maxPreloadDistance, 2)
+        }
+
+        let utilization = memoryUsageMB / limit
+
+        if utilization >= 0.75 {
+            return 0 // Too close to limit, avoid preloading
+        } else if utilization >= 0.55 {
+            return 1 // Only preload the immediate next image
+        }
+
+        return maxPreloadDistance
     }
 
     /// Gets current app memory usage
@@ -860,7 +908,11 @@ final class WallpaperViewModel: ObservableObject {
             // Images will be loaded on-demand by the wallpaper service
             logger.debug("Setting multiple wallpapers for monitors: \(imageURLs.count) images")
 
-            try await wallpaperService.setWallpaperForMultipleMonitors(imageURLs, multiMonitorSettings: settings.multiMonitorSettings)
+            try await wallpaperService.setWallpaperForMultipleMonitors(
+                imageURLs,
+                multiMonitorSettings: settings.multiMonitorSettings,
+                defaultScalingMode: settings.scalingMode
+            )
 
             let elapsed = CFAbsoluteTimeGetCurrent() - startTime
 
@@ -905,7 +957,11 @@ final class WallpaperViewModel: ObservableObject {
             let _ = await imageCache.preloadImage(from: imageFile.url)
 
             // Set wallpaper with multi-monitor support
-            try await wallpaperService.setWallpaper(imageFile.url, multiMonitorSettings: settings.multiMonitorSettings)
+            try await wallpaperService.setWallpaper(
+                imageFile.url,
+                multiMonitorSettings: settings.multiMonitorSettings,
+                defaultScalingMode: settings.scalingMode
+            )
 
             let elapsed = CFAbsoluteTimeGetCurrent() - startTime
 
@@ -950,6 +1006,9 @@ final class WallpaperViewModel: ObservableObject {
         changeCount += 1
         averageChangeTime = (averageChangeTime * Double(changeCount - 1) + elapsed) / Double(changeCount)
         lastWallpaperChangeTime = Date()
+        averageChangeDuration = averageChangeTime
+
+        PerformanceMonitor.shared.recordWallpaperChangeTime(elapsed)
 
         // Log performance metrics periodically
         if changeCount % 10 == 0 {

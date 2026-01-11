@@ -15,12 +15,12 @@ struct SystemSettingsView: View {
         Form {
             Section("System Behavior") {
                 Toggle("Pause when screen is locked", isOn: Binding(
-                    get: { viewModel.settings.systemIntegration?.pauseWhenScreenLocked ?? false },
-                    set: { viewModel.settings.systemIntegration?.pauseWhenScreenLocked = $0 }
+                    get: { viewModel.settings.systemIntegration.pauseWhenScreenLocked },
+                    set: { viewModel.settings.systemIntegration.pauseWhenScreenLocked = $0 }
                 ))
                 Toggle("Pause during presentations", isOn: Binding(
-                    get: { viewModel.settings.systemIntegration?.pauseDuringPresentations ?? true },
-                    set: { viewModel.settings.systemIntegration?.pauseDuringPresentations = $0 }
+                    get: { viewModel.settings.systemIntegration.pauseDuringPresentations },
+                    set: { viewModel.settings.systemIntegration.pauseDuringPresentations = $0 }
                 ))
             }
 

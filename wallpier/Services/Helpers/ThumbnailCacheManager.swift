@@ -7,6 +7,7 @@
 
 import Foundation
 import AppKit
+import ImageIO
 import OSLog
 import CryptoKit
 
@@ -34,7 +35,8 @@ actor ThumbnailCacheManager {
             fatalError("Unable to access system caches directory - this indicates a serious system configuration issue")
         }
 
-        self.cacheDirectory = cachesURL.appendingPathComponent("com.oxystack.wallpier/thumbnails", isDirectory: true)
+        // Bump cache version to invalidate old letterboxed thumbnails
+        self.cacheDirectory = cachesURL.appendingPathComponent("com.oxystack.wallpier/thumbnails_v2", isDirectory: true)
 
         // Create cache directory if needed
         try? fileManager.createDirectory(at: cacheDirectory, withIntermediateDirectories: true)
@@ -147,45 +149,55 @@ actor ThumbnailCacheManager {
     private func generateThumbnail(from url: URL) async -> NSImage? {
         return await withCheckedContinuation { continuation in
             DispatchQueue.global(qos: .userInitiated).async {
-                guard let image = NSImage(contentsOf: url) else {
-                    continuation.resume(returning: nil)
-                    return
-                }
-
-                let thumbnail = self.createThumbnailSync(from: image, maxSize: self.thumbnailSize)
+                let targetSize = CGSize(width: self.thumbnailSize, height: self.thumbnailSize * 0.66)
+                let thumbnail = self.createDownsampledThumbnail(from: url, targetSize: targetSize)
                 continuation.resume(returning: thumbnail)
             }
         }
     }
 
     /// Creates a thumbnail synchronously (must be called on background queue)
-    nonisolated private func createThumbnailSync(from image: NSImage, maxSize: CGFloat) -> NSImage? {
-        guard let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
-            return nil
-        }
+    nonisolated private func createDownsampledThumbnail(from url: URL, targetSize: CGSize) -> NSImage? {
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil) else { return nil }
 
-        let width = CGFloat(cgImage.width)
-        let height = CGFloat(cgImage.height)
+        let options: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            // Request extra pixels so we can crop to aspect-fill cleanly
+            kCGImageSourceThumbnailMaxPixelSize: Int(max(targetSize.width, targetSize.height) * 1.5)
+        ]
 
-        let scale = min(maxSize / width, maxSize / height)
-        let newWidth = width * scale
-        let newHeight = height * scale
+        guard let cgThumb = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else { return nil }
+        return makeAspectFillImage(from: cgThumb, targetSize: targetSize)
+    }
 
-        let thumbnail = NSImage(size: NSSize(width: newWidth, height: newHeight))
-        thumbnail.lockFocus()
+    /// Produces an aspect-fill image cropped to the center for a given target size
+    nonisolated private func makeAspectFillImage(from cgImage: CGImage, targetSize: CGSize) -> NSImage? {
+        let imageSize = CGSize(width: cgImage.width, height: cgImage.height)
+        guard imageSize.width > 0, imageSize.height > 0 else { return nil }
 
-        let context = NSGraphicsContext.current?.cgContext
-        context?.interpolationQuality = .high
+        let scale = max(targetSize.width / imageSize.width, targetSize.height / imageSize.height)
+        let scaledSize = CGSize(width: imageSize.width * scale, height: imageSize.height * scale)
+        let origin = CGPoint(
+            x: (targetSize.width - scaledSize.width) / 2,
+            y: (targetSize.height - scaledSize.height) / 2
+        )
 
-        image.draw(
-            in: NSRect(x: 0, y: 0, width: newWidth, height: newHeight),
-            from: NSRect(x: 0, y: 0, width: width, height: height),
+        let output = NSImage(size: targetSize)
+        output.lockFocus()
+        NSGraphicsContext.current?.imageInterpolation = .high
+        NSColor.clear.setFill()
+        NSBezierPath(rect: CGRect(origin: .zero, size: targetSize)).fill()
+
+        NSImage(cgImage: cgImage, size: imageSize).draw(
+            in: CGRect(origin: origin, size: scaledSize),
+            from: .zero,
             operation: .copy,
             fraction: 1.0
         )
 
-        thumbnail.unlockFocus()
-        return thumbnail
+        output.unlockFocus()
+        return output
     }
 
     /// Saves a thumbnail to disk as JPEG

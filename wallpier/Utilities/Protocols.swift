@@ -76,10 +76,10 @@ protocol WallpaperServiceProtocol: Sendable {
     func setWallpaper(_ imageURL: URL) async throws
 
     /// Set wallpaper with multi-monitor settings
-    func setWallpaper(_ imageURL: URL, multiMonitorSettings: MultiMonitorSettings) async throws
+    func setWallpaper(_ imageURL: URL, multiMonitorSettings: MultiMonitorSettings, defaultScalingMode: WallpaperScalingMode) async throws
 
     /// Set different wallpapers for multiple monitors
-    func setWallpaperForMultipleMonitors(_ imageURLs: [URL], multiMonitorSettings: MultiMonitorSettings) async throws
+    func setWallpaperForMultipleMonitors(_ imageURLs: [URL], multiMonitorSettings: MultiMonitorSettings, defaultScalingMode: WallpaperScalingMode) async throws
 
     /// Get the current wallpaper URL for the main screen
     func getCurrentWallpaper() async -> URL?

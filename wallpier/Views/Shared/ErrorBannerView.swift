@@ -23,7 +23,7 @@ struct ErrorBannerView: View {
                         .font(Typography.bodyMedium)
 
                     if let errorCode = error.errorCode {
-                        Text("[\\(errorCode)]")
+                        Text("[\(errorCode)]")
                             .font(Typography.caption)
                             .foregroundStyle(.secondary)
                     }

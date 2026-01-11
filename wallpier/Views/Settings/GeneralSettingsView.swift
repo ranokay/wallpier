@@ -11,7 +11,7 @@ struct GeneralSettingsView: View {
     @ObservedObject var viewModel: SettingsViewModel
 
     private var appVisibilityMode: String {
-        let isDockHidden = viewModel.settings.systemIntegration?.hideDockIcon ?? false
+        let isDockHidden = viewModel.settings.systemIntegration.hideDockIcon
         let showsMenuBar = viewModel.settings.showMenuBarIcon
 
         if showsMenuBar && !isDockHidden {
@@ -29,11 +29,11 @@ struct GeneralSettingsView: View {
         Form {
             Section("Application Behavior") {
                 Toggle(isOn: Binding(
-                    get: { viewModel.settings.systemIntegration?.launchAtStartup ?? false },
+                    get: { viewModel.settings.systemIntegration.launchAtStartup },
                     set: { enabled in
                         Task {
                             let _ = await SystemService().setLaunchAtStartup(enabled)
-                            viewModel.settings.systemIntegration?.launchAtStartup = enabled
+                            viewModel.settings.systemIntegration.launchAtStartup = enabled
                         }
                     }
                 )) {
@@ -54,10 +54,10 @@ struct GeneralSettingsView: View {
 
                 VStack(alignment: .leading, spacing: Spacing.sm) {
                     Toggle(isOn: Binding(
-                        get: { viewModel.settings.systemIntegration?.hideDockIcon ?? false },
+                        get: { viewModel.settings.systemIntegration.hideDockIcon },
                         set: { enabled in
                             SystemService().configureDockVisibility(!enabled)
-                            viewModel.settings.systemIntegration?.hideDockIcon = enabled
+                            viewModel.settings.systemIntegration.hideDockIcon = enabled
                         }
                     )) {
                         Text("Hide dock icon")
@@ -65,7 +65,7 @@ struct GeneralSettingsView: View {
                             .captionStyle()
                     }
 
-                    if viewModel.settings.systemIntegration?.hideDockIcon == true {
+                    if viewModel.settings.systemIntegration.hideDockIcon {
                         Text("Restart required for dock changes to take full effect")
                             .captionStyle()
                             .foregroundColor(AppColors.info)

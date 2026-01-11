@@ -7,6 +7,7 @@
 
 import Foundation
 import AppKit
+import OSLog
 
 /// Image scaling modes for wallpaper display
 enum WallpaperScalingMode: String, CaseIterable, Codable, Sendable {
@@ -73,9 +74,29 @@ enum ImageSortOrder: String, CaseIterable, Codable, Sendable {
 
 /// Main settings structure for the wallpaper application
 struct WallpaperSettings: Codable, Sendable, Equatable {
+    private static let logger = Logger(subsystem: "com.oxystack.wallpier", category: "WallpaperSettings")
+
+    enum CodingKeys: String, CodingKey {
+        case version
+        case folderPath
+        case folderBookmark
+        case isRecursiveScanEnabled
+        case cyclingInterval
+        case isCyclingEnabled
+        case scalingMode
+        case sortOrder
+        case isShuffleEnabled
+        case launchAtStartup
+        case showMenuBarIcon
+        case multiMonitorSettings
+        case fileFilters
+        case advancedSettings
+        case systemIntegration
+    }
+
     /// Current version of settings for migration
     static let currentVersion = 1
-    let version: Int
+    var version: Int
 
     /// Selected folder path for wallpaper images
     var folderPath: URL?
@@ -119,7 +140,7 @@ struct WallpaperSettings: Codable, Sendable, Equatable {
     var advancedSettings: AdvancedSettings
 
     /// System integration settings
-    var systemIntegration: SystemIntegrationSettings?
+    var systemIntegration: SystemIntegrationSettings
 
     /// Default initializer with sensible defaults
     init() {
@@ -138,6 +159,28 @@ struct WallpaperSettings: Codable, Sendable, Equatable {
         self.fileFilters = FileFilters()
         self.advancedSettings = AdvancedSettings()
         self.systemIntegration = SystemIntegrationSettings()
+    }
+
+    /// Decoder that tolerates missing fields by falling back to defaults
+    init(from decoder: Decoder) throws {
+        let defaults = WallpaperSettings()
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+
+        version = try container.decodeIfPresent(Int.self, forKey: .version) ?? defaults.version
+        folderPath = try container.decodeIfPresent(URL.self, forKey: .folderPath)
+        folderBookmark = try container.decodeIfPresent(Data.self, forKey: .folderBookmark)
+        isRecursiveScanEnabled = try container.decodeIfPresent(Bool.self, forKey: .isRecursiveScanEnabled) ?? defaults.isRecursiveScanEnabled
+        cyclingInterval = try container.decodeIfPresent(TimeInterval.self, forKey: .cyclingInterval) ?? defaults.cyclingInterval
+        isCyclingEnabled = try container.decodeIfPresent(Bool.self, forKey: .isCyclingEnabled) ?? defaults.isCyclingEnabled
+        scalingMode = try container.decodeIfPresent(WallpaperScalingMode.self, forKey: .scalingMode) ?? defaults.scalingMode
+        sortOrder = try container.decodeIfPresent(ImageSortOrder.self, forKey: .sortOrder) ?? defaults.sortOrder
+        isShuffleEnabled = try container.decodeIfPresent(Bool.self, forKey: .isShuffleEnabled) ?? defaults.isShuffleEnabled
+        launchAtStartup = try container.decodeIfPresent(Bool.self, forKey: .launchAtStartup) ?? defaults.launchAtStartup
+        showMenuBarIcon = try container.decodeIfPresent(Bool.self, forKey: .showMenuBarIcon) ?? defaults.showMenuBarIcon
+        multiMonitorSettings = try container.decodeIfPresent(MultiMonitorSettings.self, forKey: .multiMonitorSettings) ?? defaults.multiMonitorSettings
+        fileFilters = try container.decodeIfPresent(FileFilters.self, forKey: .fileFilters) ?? defaults.fileFilters
+        advancedSettings = try container.decodeIfPresent(AdvancedSettings.self, forKey: .advancedSettings) ?? defaults.advancedSettings
+        systemIntegration = try container.decodeIfPresent(SystemIntegrationSettings.self, forKey: .systemIntegration) ?? defaults.systemIntegration
     }
 
     /// Validates the current settings
@@ -264,6 +307,9 @@ struct AdvancedSettings: Codable, Sendable, Equatable {
     /// Whether to enable detailed logging
     var enableDetailedLogging: Bool
 
+    /// Whether to skip App Intents metadata extraction to silence warnings
+    var disableAppIntentsMetadataExtraction: Bool
+
     /// Maximum cache size in MB
     var maxCacheSizeMB: Int
 
@@ -273,6 +319,18 @@ struct AdvancedSettings: Codable, Sendable, Equatable {
     /// Custom accent color as hex string (nil = system default)
     var accentColorHex: String?
 
+    enum CodingKeys: String, CodingKey {
+        case maxCachedImages
+        case preloadNextImage
+        case pauseOnBattery
+        case pauseInLowPowerMode
+        case enableDetailedLogging
+        case maxCacheSizeMB
+        case memoryUsageLimitMB
+        case accentColorHex
+        case disableAppIntentsMetadataExtraction
+    }
+
     init() {
         self.maxCachedImages = 10
         self.preloadNextImage = true
@@ -281,7 +339,22 @@ struct AdvancedSettings: Codable, Sendable, Equatable {
         self.enableDetailedLogging = false
         self.maxCacheSizeMB = 100
         self.memoryUsageLimitMB = 500 // Default 500MB, more reasonable for image apps
+        self.disableAppIntentsMetadataExtraction = false
         self.accentColorHex = nil // Use system accent color by default
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+
+        maxCachedImages = try container.decodeIfPresent(Int.self, forKey: .maxCachedImages) ?? 10
+        preloadNextImage = try container.decodeIfPresent(Bool.self, forKey: .preloadNextImage) ?? true
+        pauseOnBattery = try container.decodeIfPresent(Bool.self, forKey: .pauseOnBattery) ?? false
+        pauseInLowPowerMode = try container.decodeIfPresent(Bool.self, forKey: .pauseInLowPowerMode) ?? true
+        enableDetailedLogging = try container.decodeIfPresent(Bool.self, forKey: .enableDetailedLogging) ?? false
+        maxCacheSizeMB = try container.decodeIfPresent(Int.self, forKey: .maxCacheSizeMB) ?? 100
+        memoryUsageLimitMB = try container.decodeIfPresent(Int.self, forKey: .memoryUsageLimitMB) ?? 500
+        accentColorHex = try container.decodeIfPresent(String.self, forKey: .accentColorHex)
+        disableAppIntentsMetadataExtraction = try container.decodeIfPresent(Bool.self, forKey: .disableAppIntentsMetadataExtraction) ?? false
     }
 }
 
@@ -325,7 +398,7 @@ extension WallpaperSettings {
             let data = try JSONEncoder().encode(self)
             UserDefaults.standard.set(data, forKey: Self.userDefaultsKey)
         } catch {
-            print("Failed to save settings: \(error)")
+            Self.logger.error("Failed to save settings: \(error.localizedDescription)")
         }
     }
 
@@ -342,7 +415,7 @@ extension WallpaperSettings {
             // Validate loaded settings and fix any invalid values
             return validateAndFixSettings(migratedSettings)
         } catch {
-            print("Failed to load settings: \(error)")
+            logger.error("Failed to load settings: \(error.localizedDescription)")
             return WallpaperSettings() // Return defaults on error
         }
     }
@@ -355,21 +428,21 @@ extension WallpaperSettings {
         if !fixedSettings.cyclingInterval.isFinite ||
            fixedSettings.cyclingInterval < 10 ||
            fixedSettings.cyclingInterval > 86400 {
-            print("Invalid cycling interval \(fixedSettings.cyclingInterval), resetting to 300")
+            logger.error("Invalid cycling interval \(fixedSettings.cyclingInterval), resetting to 300")
             fixedSettings.cyclingInterval = 300
         }
 
         // Validate cache size
         if fixedSettings.advancedSettings.maxCacheSizeMB < 10 ||
            fixedSettings.advancedSettings.maxCacheSizeMB > 1000 {
-            print("Invalid cache size \(fixedSettings.advancedSettings.maxCacheSizeMB), resetting to 100")
+            logger.error("Invalid cache size \(fixedSettings.advancedSettings.maxCacheSizeMB), resetting to 100")
             fixedSettings.advancedSettings.maxCacheSizeMB = 100
         }
 
         // Validate cached images count
         if fixedSettings.advancedSettings.maxCachedImages < 1 ||
            fixedSettings.advancedSettings.maxCachedImages > 100 {
-            print("Invalid cached images count \(fixedSettings.advancedSettings.maxCachedImages), resetting to 10")
+            logger.error("Invalid cached images count \(fixedSettings.advancedSettings.maxCachedImages), resetting to 10")
             fixedSettings.advancedSettings.maxCachedImages = 10
         }
 
@@ -378,14 +451,15 @@ extension WallpaperSettings {
 
     /// Migrates settings between versions
     private static func migrateIfNeeded(_ settings: WallpaperSettings) -> WallpaperSettings {
-        if settings.version < currentVersion {
-            // Perform migrations here as needed
-            var migratedSettings = settings
-            migratedSettings = WallpaperSettings() // For now, reset to defaults
-            migratedSettings.save()
-            return migratedSettings
+        guard settings.version < currentVersion else {
+            return settings
         }
-        return settings
+
+        var migratedSettings = settings
+        migratedSettings.version = currentVersion
+        migratedSettings.save()
+        logger.info("Migrated settings from version \(settings.version) to \(currentVersion)")
+        return migratedSettings
     }
 
     /// Resets settings to defaults

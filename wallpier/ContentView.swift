@@ -210,7 +210,7 @@ struct ContentView: View {
             settingsViewModel.onSettingsSaved = { newSettings in
                 wallpaperViewModel.updateSettings(newSettings)
             }
-            // Note: Initial settings sync is done in wallpierApp.onAppear
+            // Note: Initial settings sync is done in WallpierApp.onAppear
         }
         .task {
             await wallpaperViewModel.loadInitialData()

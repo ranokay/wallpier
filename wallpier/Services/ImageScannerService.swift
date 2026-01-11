@@ -13,7 +13,7 @@ import UniformTypeIdentifiers
 
 /// Service responsible for scanning directories for image files with performance optimizations
 actor ImageScannerService: ImageScannerServiceProtocol {
-    private let logger = Logger(subsystem: "com.oxystack.wallpier", category: "ImageScannerService")
+    private let logger = Logger.scanner
     private let fileManager = FileManager.default
 
     /// Supported image file extensions and MIME types

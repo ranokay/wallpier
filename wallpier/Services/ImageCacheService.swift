@@ -7,6 +7,7 @@
 
 import Foundation
 import AppKit
+import ImageIO
 import OSLog
 import Combine
 
@@ -15,7 +16,7 @@ import Combine
 /// Service responsible for efficient image caching with performance optimizations
 @MainActor
 @preconcurrency final class ImageCacheService: ImageCacheServiceProtocol {
-    private let logger = Logger(subsystem: "com.oxystack.wallpier", category: "ImageCacheService")
+    private let logger = Logger.cache
 
     /// Multi-level caching system
     private let imageCache = NSCache<NSString, NSImage>()
@@ -33,7 +34,8 @@ import Combine
     private let backgroundQueue = DispatchQueue(label: "com.oxystack.wallpier.imagecache.background", qos: .utility, attributes: .concurrent)
 
     /// Performance optimization settings
-    private let maxCacheSize: Int
+    private var maxCacheSize: Int
+    private var enableLogging: Bool
     private let maxThumbnailSize: Int = 10 * 1024 * 1024 // 10MB for thumbnails
     private let preloadBatchSize = 2 // Very conservative batch size
     private let maxConcurrentLoads = 4
@@ -47,6 +49,10 @@ import Combine
     private var cacheHits = 0
     private var cacheMisses = 0
     private var preloadRequests = 0
+
+    /// Timers for maintenance/logging
+    private var optimizeTimer: Timer?
+    private var logTimer: Timer?
 
     /// Enhanced metadata for intelligent caching
     class ImageMetadata: NSObject {
@@ -103,16 +109,19 @@ import Combine
         }
     }
 
-    init(maxCacheSizeMB: Int = 25) {
+    init(maxCacheSizeMB: Int = 25, enableLogging: Bool = false) {
         self.maxCacheSize = max(5, min(maxCacheSizeMB, 100)) // Much more conservative range
+        self.enableLogging = enableLogging
         configureCache()
         setupMemoryManagement()
 
-        logger.info("ImageCacheService initialized with \(self.maxCacheSize)MB limit")
+        logger.info("ImageCacheService initialized with \(self.maxCacheSize)MB limit (logging: \(enableLogging))")
     }
 
     deinit {
         NotificationCenter.default.removeObserver(self)
+        optimizeTimer?.invalidate()
+        logTimer?.invalidate()
     }
 
     /// Configures all cache layers with aggressive memory limits
@@ -149,16 +158,34 @@ import Combine
             Task { await self?.performBackgroundCleanup() }
         }
 
-        // Periodic optimization (less frequent) and statistics reporting
-        Timer.scheduledTimer(withTimeInterval: 600, repeats: true) { [weak self] _ in
+        // Periodic optimization (less frequent) and optional statistics reporting
+        optimizeTimer?.invalidate()
+        optimizeTimer = Timer.scheduledTimer(withTimeInterval: 600, repeats: true) { [weak self] _ in
             Task { await self?.optimizeCache() }
         }
 
-        Timer.scheduledTimer(withTimeInterval: 300, repeats: true) { [weak self] _ in
-            Task { @MainActor in
-                self?.logCacheStatistics()
+        logTimer?.invalidate()
+        if enableLogging {
+            logTimer = Timer.scheduledTimer(withTimeInterval: 300, repeats: true) { [weak self] _ in
+                Task { @MainActor in
+                    self?.logCacheStatistics()
+                }
             }
         }
+    }
+
+    /// Updates cache sizing and logging configuration at runtime
+    func updateConfiguration(maxCacheSizeMB: Int, enableLogging: Bool) {
+        let clampedSize = max(5, min(maxCacheSizeMB, 100))
+        let shouldReconfigure = clampedSize != maxCacheSize || enableLogging != self.enableLogging
+
+        guard shouldReconfigure else { return }
+
+        logger.info("Updating cache configuration: size \(clampedSize)MB, logging: \(enableLogging)")
+        maxCacheSize = clampedSize
+        self.enableLogging = enableLogging
+        configureCache()
+        setupMemoryManagement()
     }
 
     /// Caches an image with enhanced metadata and smart eviction
@@ -422,20 +449,16 @@ import Combine
         // Load and resize on background queue
         return await withCheckedContinuation { continuation in
             backgroundQueue.async { [weak self] in
-                guard let self = self else {
+                guard let self else {
                     continuation.resume(returning: nil)
                     return
                 }
 
-                guard let originalImage = NSImage(contentsOf: url) else {
-                    continuation.resume(returning: nil)
-                    return
-                }
-
-                let thumbnail = self.createThumbnailSync(from: originalImage, maxSize: maxSize)
+                let targetSize = CGSize(width: maxSize, height: maxSize * 0.66)
+                let thumbnail = self.createDownsampledThumbnail(from: url, targetSize: targetSize)
 
                 Task { @MainActor in
-                    if let thumbnail = thumbnail {
+                    if let thumbnail {
                         self.cacheThumbnail(thumbnail, for: url, size: maxSize)
                     }
                     continuation.resume(returning: thumbnail)
@@ -447,6 +470,50 @@ import Combine
     /// Create a thumbnail key with size for cache differentiation
     private func thumbnailKey(for url: URL, size: CGFloat) -> NSString {
         return "\(url.absoluteString)_thumb_\(Int(size))" as NSString
+    }
+
+    /// Downsamples and center-crops an image from disk to a predictable thumbnail size to avoid letterboxing
+    private func createDownsampledThumbnail(from url: URL, targetSize: CGSize) -> NSImage? {
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil) else { return nil }
+
+        let options: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            // Request a slightly larger thumbnail so we can crop to aspect-fill cleanly
+            kCGImageSourceThumbnailMaxPixelSize: Int(max(targetSize.width, targetSize.height) * 1.5)
+        ]
+
+        guard let cgThumb = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else { return nil }
+        return makeAspectFillImage(from: cgThumb, targetSize: targetSize)
+    }
+
+    /// Produces an aspect-fill image cropped to the center for a given target size
+    private func makeAspectFillImage(from cgImage: CGImage, targetSize: CGSize) -> NSImage? {
+        let imageSize = CGSize(width: cgImage.width, height: cgImage.height)
+        guard imageSize.width > 0, imageSize.height > 0 else { return nil }
+
+        let scale = max(targetSize.width / imageSize.width, targetSize.height / imageSize.height)
+        let scaledSize = CGSize(width: imageSize.width * scale, height: imageSize.height * scale)
+        let origin = CGPoint(
+            x: (targetSize.width - scaledSize.width) / 2,
+            y: (targetSize.height - scaledSize.height) / 2
+        )
+
+        let output = NSImage(size: targetSize)
+        output.lockFocus()
+        NSGraphicsContext.current?.imageInterpolation = .high
+        NSColor.clear.setFill()
+        NSBezierPath(rect: CGRect(origin: .zero, size: targetSize)).fill()
+
+        NSImage(cgImage: cgImage, size: imageSize).draw(
+            in: CGRect(origin: origin, size: scaledSize),
+            from: .zero,
+            operation: .copy,
+            fraction: 1.0
+        )
+
+        output.unlockFocus()
+        return output
     }
 
     /// Synchronous thumbnail creation for background queue
@@ -590,7 +657,7 @@ import Combine
         let currentSize = getCacheSize()
         let limit = maxCacheSize * 1024 * 1024
 
-        return currentSize > Int(Double(limit) * 0.8) || isUnderMemoryPressure
+        return currentSize > Int(Double(limit) * 0.7) || isUnderMemoryPressure
     }
 
     /// Much more aggressive smart eviction

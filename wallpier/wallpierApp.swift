@@ -19,14 +19,13 @@ extension Notification.Name {
 }
 
 @main
-struct wallpierApp: App {
+struct WallpierApp: App {
     // MARK: - State Objects
 
     @StateObject private var wallpaperViewModel = WallpaperViewModel()
     @StateObject private var settingsViewModel: SettingsViewModel
     @StateObject private var errorPresenter = ErrorPresenter()
     @StateObject private var systemService = SystemService()
-    @State private var showingMainWindow = true
     @State private var showingSettings = false
 
     // MARK: - App Storage
@@ -39,6 +38,8 @@ struct wallpierApp: App {
         // Load settings for SettingsViewModel
         let settings = WallpaperSettings.load()
         _settingsViewModel = StateObject(wrappedValue: SettingsViewModel(settings: settings))
+
+        AppIntentsMetadataController.apply(disableExtraction: settings.advancedSettings.disableAppIntentsMetadataExtraction)
 
         // Setup app delegate
         NSApplication.shared.delegate = AppDelegate.shared
@@ -61,7 +62,6 @@ struct wallpierApp: App {
                 .tint(appAccentColor)
                 .frame(minWidth: 950, minHeight: 700)
                 .onReceive(NotificationCenter.default.publisher(for: .openMainWindow)) { _ in
-                    showingMainWindow = true
                     // Bring app to front
                     NSApp.activate(ignoringOtherApps: true)
                 }
@@ -136,18 +136,12 @@ struct wallpierApp: App {
                 .disabled(!wallpaperViewModel.canGoBack)
             }
         }
-
-        // Settings Window (separate window group)
-        WindowGroup("Wallpier Settings", id: "settings") {
-            SettingsView(viewModel: settingsViewModel)
-                .environmentObject(systemService)
-        }
-        .windowResizability(.contentSize)
-        .defaultSize(width: 750, height: 550)
-        .defaultPosition(.center)
-
-        // Menu Bar Extra - always present but content controlled by settings
-        MenuBarExtra("Wallpier", systemImage: "photo.on.rectangle.angled") {
+        // Menu Bar Extra - conditionally inserted via isInserted to avoid SceneBuilder ambiguity
+        MenuBarExtra(
+            "Wallpier",
+            systemImage: "photo.on.rectangle.angled",
+            isInserted: .constant(settingsViewModel.settings.showMenuBarIcon)
+        ) {
             StatusMenuContent(
                 wallpaperViewModel: wallpaperViewModel,
                 settingsViewModel: settingsViewModel,
@@ -162,7 +156,7 @@ struct wallpierApp: App {
 
     private func setupInitialAppBehavior() async {
         // Configure dock visibility based on settings
-        let hideDock = settingsViewModel.settings.systemIntegration?.hideDockIcon ?? false
+        let hideDock = settingsViewModel.settings.systemIntegration.hideDockIcon
         systemService.configureDockVisibility(!hideDock)
 
         // Show initial setup dialogs only if this is first launch and no folder selected
