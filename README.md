@@ -4,7 +4,8 @@
 
 A fast, elegant, and memory-efficient macOS application that automatically cycles through your favorite wallpapers with intelligent multi-monitor support, built with SwiftUI.
 
-![Wallpier Main Interface](screenshots/main-interface.png)
+<img width="1062" height="844" alt="image" src="https://github.com/user-attachments/assets/533b6065-493f-4179-9d23-beed0af8adf2" />
+
 
 ## ✨ Features
 
